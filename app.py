@@ -242,45 +242,81 @@ def api_modules():
 @app.route('/api/upload/takserver', methods=['POST'])
 @login_required
 def upload_takserver_package():
-    """Handle TAK Server package upload (.deb or .rpm)"""
-    if 'package' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+    """Handle TAK Server file uploads (.deb/.rpm, GPG key, policy file)"""
+    if 'files' not in request.files:
+        return jsonify({'error': 'No files uploaded'}), 400
 
-    f = request.files['package']
-    filename = f.filename
+    files = request.files.getlist('files')
+    if not files or all(f.filename == '' for f in files):
+        return jsonify({'error': 'No files selected'}), 400
 
-    if not filename:
-        return jsonify({'error': 'No file selected'}), 400
-
-    # Validate file extension
-    if not (filename.endswith('.deb') or filename.endswith('.rpm')):
-        return jsonify({'error': 'File must be a .deb or .rpm package'}), 400
-
-    # Save to uploads directory
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    f.save(filepath)
-
-    # Detect package type
     settings = load_settings()
     os_type = settings.get('os_type', '')
-    pkg_type = 'deb' if filename.endswith('.deb') else 'rpm'
 
-    # Validate package matches OS
-    if 'ubuntu' in os_type and pkg_type == 'rpm':
+    # Allowed file patterns
+    results = {
+        'package': None,
+        'gpg_key': None,
+        'policy': None,
+        'unknown': []
+    }
+
+    for f in files:
+        filename = f.filename
+        if not filename:
+            continue
+
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        f.save(filepath)
+        size_mb = round(os.path.getsize(filepath) / (1024*1024), 1)
+
+        if filename.endswith('.deb'):
+            # Validate OS match
+            if 'rocky' in os_type:
+                os.remove(filepath)
+                return jsonify({
+                    'error': f'DEB package uploaded but system is {os_type}. Need .rpm.'
+                }), 400
+            results['package'] = {
+                'filename': filename, 'filepath': filepath,
+                'pkg_type': 'deb', 'size_mb': size_mb
+            }
+
+        elif filename.endswith('.rpm'):
+            if 'ubuntu' in os_type:
+                os.remove(filepath)
+                return jsonify({
+                    'error': f'RPM package uploaded but system is {os_type}. Need .deb.'
+                }), 400
+            results['package'] = {
+                'filename': filename, 'filepath': filepath,
+                'pkg_type': 'rpm', 'size_mb': size_mb
+            }
+
+        elif filename.endswith('.key') or 'gpg' in filename.lower():
+            results['gpg_key'] = {
+                'filename': filename, 'filepath': filepath, 'size_mb': size_mb
+            }
+
+        elif filename.endswith('.pol') or 'policy' in filename.lower():
+            results['policy'] = {
+                'filename': filename, 'filepath': filepath, 'size_mb': size_mb
+            }
+
+        else:
+            results['unknown'].append(filename)
+
+    if not results['package']:
         return jsonify({
-            'error': f'RPM package uploaded but system is {os_type}. Please upload a .deb package.'
-        }), 400
-    if 'rocky' in os_type and pkg_type == 'deb':
-        return jsonify({
-            'error': f'DEB package uploaded but system is {os_type}. Please upload a .rpm package.'
+            'error': 'No .deb or .rpm package found in uploaded files'
         }), 400
 
     return jsonify({
         'success': True,
-        'filename': filename,
-        'filepath': filepath,
-        'pkg_type': pkg_type,
-        'size_mb': round(os.path.getsize(filepath) / (1024*1024), 1)
+        'package': results['package'],
+        'gpg_key': results['gpg_key'],
+        'policy': results['policy'],
+        'has_verification': results['gpg_key'] is not None and results['policy'] is not None
     })
 
 # =============================================================================
@@ -912,13 +948,32 @@ DASHBOARD_TEMPLATE = '''
              ondrop="handleDrop(event)" ondragover="handleDragOver(event)"
              ondragleave="handleDragLeave(event)" onclick="document.getElementById('file-input').click()">
             <div class="upload-icon">📦</div>
-            <div class="upload-text">Drop your TAK Server package here</div>
-            <div class="upload-hint">.deb for Ubuntu &nbsp;|&nbsp; .rpm for Rocky Linux</div>
+            <div class="upload-text">Drop your TAK Server files here</div>
+            <div class="upload-hint">
+                Required: .deb or .rpm package<br>
+                Optional: takserver-public-gpg.key + deb_policy.pol
+            </div>
             <input type="file" id="file-input" style="display:none"
-                   accept=".deb,.rpm" onchange="handleFileSelect(event)">
+                   multiple accept=".deb,.rpm,.key,.pol" onchange="handleFileSelect(event)">
         </div>
-        <div id="upload-status" style="margin-top: 16px; text-align: center;
-             font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text-secondary);"></div>
+        <div id="upload-status" style="margin-top: 16px;
+             font-family: 'JetBrains Mono', monospace; font-size: 13px;"></div>
+        <div id="upload-results" style="margin-top: 16px; display: none;">
+            <div style="background: var(--bg-card); border: 1px solid var(--border);
+                        border-radius: 12px; padding: 20px;">
+                <div id="upload-files-list" style="font-family: 'JetBrains Mono', monospace;
+                     font-size: 13px; color: var(--text-secondary);"></div>
+                <div style="margin-top: 20px; text-align: center;">
+                    <button onclick="showDeployConfig()" style="
+                        padding: 12px 32px;
+                        background: linear-gradient(135deg, #1e40af, #0e7490);
+                        color: #fff; border: none; border-radius: 10px;
+                        font-family: 'DM Sans', sans-serif; font-size: 15px;
+                        font-weight: 600; cursor: pointer; transition: all 0.2s;
+                    ">Configure &amp; Deploy →</button>
+                </div>
+            </div>
+        </div>
         {% endif %}
     </main>
 
@@ -961,21 +1016,29 @@ DASHBOARD_TEMPLATE = '''
             e.preventDefault();
             document.getElementById('upload-area').classList.remove('dragover');
             const files = e.dataTransfer.files;
-            if (files.length > 0) uploadFile(files[0]);
+            if (files.length > 0) uploadFiles(files);
         }
 
         function handleFileSelect(e) {
             const files = e.target.files;
-            if (files.length > 0) uploadFile(files[0]);
+            if (files.length > 0) uploadFiles(files);
         }
 
-        async function uploadFile(file) {
+        let uploadedData = null;
+
+        async function uploadFiles(files) {
             const status = document.getElementById('upload-status');
+            const results = document.getElementById('upload-results');
+            const filesList = document.getElementById('upload-files-list');
+
             status.style.color = 'var(--cyan)';
-            status.textContent = 'Uploading ' + file.name + '...';
+            status.textContent = 'Uploading ' + files.length + ' file(s)...';
+            results.style.display = 'none';
 
             const formData = new FormData();
-            formData.append('package', file);
+            for (let i = 0; i < files.length; i++) {
+                formData.append('files', files[i]);
+            }
 
             try {
                 const resp = await fetch('/api/upload/takserver', {
@@ -985,9 +1048,38 @@ DASHBOARD_TEMPLATE = '''
                 const data = await resp.json();
 
                 if (data.success) {
+                    uploadedData = data;
                     status.style.color = 'var(--green)';
-                    status.textContent = '✓ ' + data.filename + ' uploaded (' + data.size_mb + ' MB) — Ready to deploy';
-                    // TODO: Show deploy configuration form
+                    status.textContent = '✓ Files uploaded successfully';
+
+                    // Build file list display
+                    let html = '';
+                    html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
+                            data.package.filename + '</span> (' + data.package.size_mb + ' MB)</div>';
+
+                    if (data.gpg_key) {
+                        html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
+                                data.gpg_key.filename + '</span> (GPG key)</div>';
+                    } else {
+                        html += '<div style="margin-bottom: 8px; color: var(--text-dim);">⚠️ No GPG key — signature verification will be skipped</div>';
+                    }
+
+                    if (data.policy) {
+                        html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
+                                data.policy.filename + '</span> (Policy file)</div>';
+                    } else if (data.gpg_key) {
+                        html += '<div style="margin-bottom: 8px; color: var(--yellow);">⚠️ No policy file — need both GPG key + policy for verification</div>';
+                    }
+
+                    if (data.has_verification) {
+                        html += '<div style="margin-top: 8px; color: var(--green);">🔐 Package signature verification enabled</div>';
+                    }
+
+                    filesList.innerHTML = html;
+                    results.style.display = 'block';
+
+                    // Hide the upload area
+                    document.getElementById('upload-area').style.display = 'none';
                 } else {
                     status.style.color = 'var(--red)';
                     status.textContent = '✗ ' + data.error;
@@ -996,6 +1088,11 @@ DASHBOARD_TEMPLATE = '''
                 status.style.color = 'var(--red)';
                 status.textContent = '✗ Upload failed: ' + e.message;
             }
+        }
+
+        function showDeployConfig() {
+            // TODO: Show the deploy configuration form
+            alert('Deploy configuration coming next!');
         }
     </script>
 </body>
