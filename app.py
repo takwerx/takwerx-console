@@ -851,6 +851,68 @@ DASHBOARD_TEMPLATE = '''
             color: var(--text-dim);
         }
 
+        /* Progress bars */
+        .file-progress {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+        }
+
+        .file-progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+        }
+
+        .file-progress-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 70%;
+        }
+
+        .file-progress-pct {
+            color: var(--cyan);
+            font-weight: 600;
+        }
+
+        .file-progress-bar {
+            height: 4px;
+            background: rgba(59, 130, 246, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .file-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--cyan));
+            border-radius: 2px;
+            transition: width 0.15s ease;
+            width: 0%;
+        }
+
+        .file-progress.complete .file-progress-fill {
+            background: var(--green);
+        }
+
+        .file-progress.complete .file-progress-pct {
+            color: var(--green);
+        }
+
+        .file-progress.error .file-progress-fill {
+            background: var(--red);
+        }
+
+        .file-progress.error .file-progress-pct {
+            color: var(--red);
+        }
+
         /* Footer */
         .footer {
             text-align: center;
@@ -951,19 +1013,33 @@ DASHBOARD_TEMPLATE = '''
             <div class="upload-text">Drop your TAK Server files here</div>
             <div class="upload-hint">
                 Required: .deb or .rpm package<br>
-                Optional: takserver-public-gpg.key + deb_policy.pol
+                Optional: takserver-public-gpg.key + deb_policy.pol<br>
+                <span style="color: var(--text-dim); font-size: 11px;">Select all at once or add files one at a time</span>
             </div>
             <input type="file" id="file-input" style="display:none"
                    multiple accept=".deb,.rpm,.key,.pol" onchange="handleFileSelect(event)">
         </div>
-        <div id="upload-status" style="margin-top: 16px;
-             font-family: 'JetBrains Mono', monospace; font-size: 13px;"></div>
+
+        <!-- Per-file progress bars -->
+        <div id="progress-area" style="margin-top: 16px;"></div>
+
+        <!-- Upload results & deploy button -->
         <div id="upload-results" style="margin-top: 16px; display: none;">
             <div style="background: var(--bg-card); border: 1px solid var(--border);
                         border-radius: 12px; padding: 20px;">
                 <div id="upload-files-list" style="font-family: 'JetBrains Mono', monospace;
                      font-size: 13px; color: var(--text-secondary);"></div>
-                <div style="margin-top: 20px; text-align: center;">
+                <div id="add-more-area" style="margin-top: 16px; text-align: center;">
+                    <button onclick="document.getElementById('file-input-more').click()" style="
+                        padding: 8px 20px; background: transparent;
+                        color: var(--accent); border: 1px solid var(--border);
+                        border-radius: 8px; font-family: 'JetBrains Mono', monospace;
+                        font-size: 12px; cursor: pointer; transition: all 0.2s;
+                    ">+ Add more files</button>
+                    <input type="file" id="file-input-more" style="display:none"
+                           multiple accept=".deb,.rpm,.key,.pol" onchange="handleAddMore(event)">
+                </div>
+                <div id="deploy-btn-area" style="margin-top: 20px; text-align: center; display: none;">
                     <button onclick="showDeployConfig()" style="
                         padding: 12px 32px;
                         background: linear-gradient(135deg, #1e40af, #0e7490);
@@ -997,12 +1073,13 @@ DASHBOARD_TEMPLATE = '''
 
         // Module click handler
         function moduleClick(key) {
-            // For now, just navigate to module page (to be built)
-            // window.location.href = '/module/' + key;
             console.log('Module clicked:', key);
         }
 
-        // File upload handlers
+        // Upload state - tracks all uploaded files
+        let uploadedFiles = { package: null, gpg_key: null, policy: null };
+        let uploadsInProgress = 0;
+
         function handleDragOver(e) {
             e.preventDefault();
             document.getElementById('upload-area').classList.add('dragover');
@@ -1015,79 +1092,159 @@ DASHBOARD_TEMPLATE = '''
         function handleDrop(e) {
             e.preventDefault();
             document.getElementById('upload-area').classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length > 0) uploadFiles(files);
+            queueFiles(e.dataTransfer.files);
         }
 
         function handleFileSelect(e) {
-            const files = e.target.files;
-            if (files.length > 0) uploadFiles(files);
+            queueFiles(e.target.files);
+            e.target.value = '';  // Reset so same file can be re-selected
         }
 
-        let uploadedData = null;
+        function handleAddMore(e) {
+            queueFiles(e.target.files);
+            e.target.value = '';
+        }
 
-        async function uploadFiles(files) {
-            const status = document.getElementById('upload-status');
+        function formatSize(bytes) {
+            if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024*1024*1024)).toFixed(1) + ' GB';
+            if (bytes >= 1024 * 1024) return (bytes / (1024*1024)).toFixed(1) + ' MB';
+            if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return bytes + ' B';
+        }
+
+        function queueFiles(fileList) {
+            for (let i = 0; i < fileList.length; i++) {
+                uploadSingleFile(fileList[i]);
+            }
+        }
+
+        function uploadSingleFile(file) {
+            const progressArea = document.getElementById('progress-area');
+            const fileId = 'upload-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5);
+
+            // Create progress bar element
+            const progressEl = document.createElement('div');
+            progressEl.className = 'file-progress';
+            progressEl.id = fileId;
+            progressEl.innerHTML = `
+                <div class="file-progress-header">
+                    <span class="file-progress-name">${file.name}</span>
+                    <span class="file-progress-size">${formatSize(file.size)}</span>
+                    <span class="file-progress-pct">0%</span>
+                </div>
+                <div class="file-progress-bar">
+                    <div class="file-progress-fill"></div>
+                </div>
+            `;
+            progressArea.appendChild(progressEl);
+
+            // Upload via XHR for progress tracking
+            const xhr = new XMLHttpRequest();
+            const formData = new FormData();
+            formData.append('files', file);
+
+            uploadsInProgress++;
+
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) {
+                    const pct = Math.round((e.loaded / e.total) * 100);
+                    const el = document.getElementById(fileId);
+                    el.querySelector('.file-progress-pct').textContent = pct + '%';
+                    el.querySelector('.file-progress-fill').style.width = pct + '%';
+                }
+            });
+
+            xhr.addEventListener('load', () => {
+                uploadsInProgress--;
+                const el = document.getElementById(fileId);
+
+                try {
+                    const data = JSON.parse(xhr.responseText);
+
+                    if (xhr.status === 200 && data.success) {
+                        el.classList.add('complete');
+                        el.querySelector('.file-progress-pct').textContent = '✓';
+                        el.querySelector('.file-progress-fill').style.width = '100%';
+
+                        // Store results
+                        if (data.package) uploadedFiles.package = data.package;
+                        if (data.gpg_key) uploadedFiles.gpg_key = data.gpg_key;
+                        if (data.policy) uploadedFiles.policy = data.policy;
+                    } else {
+                        el.classList.add('error');
+                        el.querySelector('.file-progress-pct').textContent = '✗';
+                        el.querySelector('.file-progress-fill').style.width = '100%';
+                        // Show error below the progress bar
+                        const errDiv = document.createElement('div');
+                        errDiv.style.cssText = 'color: var(--red); font-size: 12px; margin-top: 6px;';
+                        errDiv.textContent = data.error || 'Upload failed';
+                        el.appendChild(errDiv);
+                    }
+                } catch(e) {
+                    el.classList.add('error');
+                    el.querySelector('.file-progress-pct').textContent = '✗';
+                }
+
+                updateResultsDisplay();
+            });
+
+            xhr.addEventListener('error', () => {
+                uploadsInProgress--;
+                const el = document.getElementById(fileId);
+                el.classList.add('error');
+                el.querySelector('.file-progress-pct').textContent = '✗';
+                el.querySelector('.file-progress-fill').style.width = '100%';
+                updateResultsDisplay();
+            });
+
+            xhr.open('POST', '/api/upload/takserver');
+            xhr.send(formData);
+        }
+
+        function updateResultsDisplay() {
+            // Only update when all uploads are done
+            if (uploadsInProgress > 0) return;
+
             const results = document.getElementById('upload-results');
             const filesList = document.getElementById('upload-files-list');
+            const deployBtn = document.getElementById('deploy-btn-area');
 
-            status.style.color = 'var(--cyan)';
-            status.textContent = 'Uploading ' + files.length + ' file(s)...';
-            results.style.display = 'none';
+            if (!uploadedFiles.package) return;
 
-            const formData = new FormData();
-            for (let i = 0; i < files.length; i++) {
-                formData.append('files', files[i]);
+            // Build summary
+            let html = '';
+            html += '<div style="margin-bottom: 10px;">✅ <span style="color: var(--green);">' +
+                    uploadedFiles.package.filename + '</span> <span style="color: var(--text-dim);">(' +
+                    uploadedFiles.package.size_mb + ' MB)</span></div>';
+
+            if (uploadedFiles.gpg_key) {
+                html += '<div style="margin-bottom: 10px;">✅ <span style="color: var(--green);">' +
+                        uploadedFiles.gpg_key.filename + '</span> <span style="color: var(--text-dim);">(GPG key)</span></div>';
             }
 
-            try {
-                const resp = await fetch('/api/upload/takserver', {
-                    method: 'POST',
-                    body: formData
-                });
-                const data = await resp.json();
-
-                if (data.success) {
-                    uploadedData = data;
-                    status.style.color = 'var(--green)';
-                    status.textContent = '✓ Files uploaded successfully';
-
-                    // Build file list display
-                    let html = '';
-                    html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
-                            data.package.filename + '</span> (' + data.package.size_mb + ' MB)</div>';
-
-                    if (data.gpg_key) {
-                        html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
-                                data.gpg_key.filename + '</span> (GPG key)</div>';
-                    } else {
-                        html += '<div style="margin-bottom: 8px; color: var(--text-dim);">⚠️ No GPG key — signature verification will be skipped</div>';
-                    }
-
-                    if (data.policy) {
-                        html += '<div style="margin-bottom: 8px;">✅ <span style="color: var(--green);">' +
-                                data.policy.filename + '</span> (Policy file)</div>';
-                    } else if (data.gpg_key) {
-                        html += '<div style="margin-bottom: 8px; color: var(--yellow);">⚠️ No policy file — need both GPG key + policy for verification</div>';
-                    }
-
-                    if (data.has_verification) {
-                        html += '<div style="margin-top: 8px; color: var(--green);">🔐 Package signature verification enabled</div>';
-                    }
-
-                    filesList.innerHTML = html;
-                    results.style.display = 'block';
-
-                    // Hide the upload area
-                    document.getElementById('upload-area').style.display = 'none';
-                } else {
-                    status.style.color = 'var(--red)';
-                    status.textContent = '✗ ' + data.error;
-                }
-            } catch(e) {
-                status.style.color = 'var(--red)';
-                status.textContent = '✗ Upload failed: ' + e.message;
+            if (uploadedFiles.policy) {
+                html += '<div style="margin-bottom: 10px;">✅ <span style="color: var(--green);">' +
+                        uploadedFiles.policy.filename + '</span> <span style="color: var(--text-dim);">(Policy)</span></div>';
             }
+
+            if (uploadedFiles.gpg_key && uploadedFiles.policy) {
+                html += '<div style="margin-top: 12px; color: var(--green);">🔐 Package signature verification enabled</div>';
+            } else if (!uploadedFiles.gpg_key && !uploadedFiles.policy) {
+                html += '<div style="margin-top: 12px; color: var(--text-dim);">ℹ️ No GPG key/policy — signature verification will be skipped</div>';
+            } else {
+                html += '<div style="margin-top: 12px; color: var(--yellow);">⚠️ Need both GPG key + policy for verification — add the missing file or proceed without</div>';
+            }
+
+            filesList.innerHTML = html;
+            results.style.display = 'block';
+            deployBtn.style.display = 'block';
+
+            // Shrink the upload area but keep it available
+            const uploadArea = document.getElementById('upload-area');
+            uploadArea.style.padding = '20px';
+            uploadArea.querySelector('.upload-icon').style.fontSize = '24px';
+            uploadArea.querySelector('.upload-text').textContent = 'Drop more files to add';
+            uploadArea.querySelector('.upload-hint').style.display = 'none';
         }
 
         function showDeployConfig() {
