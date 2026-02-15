@@ -268,17 +268,45 @@ def run_cmd(cmd, desc=None, check=True):
         log_step(f"✗ {str(e)}")
         return False
 
+def wait_for_package_lock():
+    """Wait for unattended-upgrades to finish (common on fresh VPS)
+    Uses pgrep -f to match exact process, not the shutdown handler.
+    Battle-tested from Ubuntu_22.04_TAK_Server_install.sh"""
+    log_step("Checking for system upgrades in progress...")
+    r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
+    if r.stdout.strip() == '':
+        log_step("\u2713 No system upgrades in progress, continuing...")
+        return True
+    log_step("\u23f3 System is running unattended-upgrades, waiting for completion...")
+    max_wait = 600
+    waited = 0
+    while waited < max_wait:
+        time.sleep(10)
+        waited += 10
+        r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
+        if r.stdout.strip() == '':
+            log_step(f"\u2713 System upgrades complete! (waited {waited}s)")
+            time.sleep(5)
+            return True
+        if waited % 60 == 0:
+            m = waited // 60
+            log_step(f"  Still waiting... {m} minute{'s' if m != 1 else ''} elapsed")
+    log_step("\u26a0 Upgrade wait timeout (10 min) \u2014 attempting anyway")
+    return False
+
 def run_takserver_deploy(config):
     try:
         log_step("=" * 50); log_step("TAK Server Deployment Starting"); log_step("=" * 50)
         pkg = config['package_path']; pkg_name = os.path.basename(pkg)
+
+        wait_for_package_lock()
 
         log_step(""); log_step("━━━ Step 1/9: System Limits ━━━")
         run_cmd('grep -q "soft nofile 32768" /etc/security/limits.conf || echo -e "* soft nofile 32768\\n* hard nofile 32768" >> /etc/security/limits.conf', "Increasing JVM thread limits...")
         log_step("✓ System limits configured")
 
         log_step(""); log_step("━━━ Step 2/9: PostgreSQL Repository ━━━")
-        run_cmd('apt-get install -y lsb-release > /dev/null 2>&1', "Installing prerequisites...")
+        run_cmd('apt-get install -y lsb-release > /dev/null 2>&1', "Installing prerequisites...", check=False)
         run_cmd('install -d /usr/share/postgresql-common/pgdg', check=False)
         run_cmd('curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc 2>/dev/null', "Adding PostgreSQL GPG key...")
         run_cmd('echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list')
@@ -288,7 +316,7 @@ def run_takserver_deploy(config):
         log_step(""); log_step("━━━ Step 3/9: Package Verification ━━━")
         if config.get('gpg_key_path') and config.get('policy_path'):
             log_step("GPG key and policy found — verifying...")
-            run_cmd('apt-get install -y debsig-verify gnupg2 > /dev/null 2>&1')
+            run_cmd('apt-get install -y debsig-verify gnupg2 > /dev/null 2>&1', check=False)
             r = subprocess.run(f"sed -n 's/.*id=\"\\([^\"]*\\)\".*/\\1/p' {config['policy_path']} | head -1", shell=True, capture_output=True, text=True)
             pid = r.stdout.strip()
             log_step(f"  Policy ID: {pid}")
@@ -305,11 +333,22 @@ def run_takserver_deploy(config):
 
         log_step(""); log_step("━━━ Step 4/9: Installing TAK Server ━━━")
         log_step(f"Installing {pkg_name}...")
-        if not run_cmd(f'DEBIAN_FRONTEND=noninteractive apt-get install -y {pkg} 2>&1', check=False):
+        # Primary: apt-get install handles dependencies automatically
+        r1 = run_cmd(f'DEBIAN_FRONTEND=noninteractive apt-get install -y {pkg} 2>&1', check=False)
+        if not r1:
+            # Fallback: dpkg + fix-broken (proven chain from Ubuntu script)
+            log_step("  apt-get failed, trying dpkg + dependency fix...")
             run_cmd(f'dpkg -i {pkg} 2>&1', check=False)
-            run_cmd('apt-get install -f -y 2>&1', check=False)
+            run_cmd('apt-get install -f -y 2>&1', "  Resolving dependencies...", check=False)
+        # PostgreSQL cluster check (from proven script - sometimes cluster isn't created)
+        pg_check = subprocess.run('pg_lsclusters 2>/dev/null | grep -q "15"', shell=True, capture_output=True)
+        if pg_check.returncode != 0:
+            log_step("  Creating PostgreSQL 15 cluster...")
+            run_cmd('pg_createcluster 15 main --start 2>&1', check=False)
+        # dpkg --configure if partially installed (from proven script)
+        run_cmd('dpkg --configure -a 2>&1', check=False, quiet=True)
         if not os.path.exists('/opt/tak'):
-            log_step("✗ FATAL: /opt/tak not found"); deploy_status.update({'error': True, 'running': False}); return
+            log_step("✗ FATAL: /opt/tak not found after install"); deploy_status.update({'error': True, 'running': False}); return
         log_step("✓ TAK Server installed")
 
         log_step(""); log_step("━━━ Step 5/9: Starting TAK Server ━━━")
@@ -800,9 +839,10 @@ function checkPasswordMatch(){const p=document.getElementById('webadmin_password
 function validatePassword(){
     const p=document.getElementById('webadmin_password').value;const el=document.getElementById('password-validation');
     if(!p){el.innerHTML='';return false}
-    const c=[{t:p.length>=15,l:'15+ chars'},{t:/[A-Z]/.test(p),l:'1 upper'},{t:/[a-z]/.test(p),l:'1 lower'},{t:/[0-9]/.test(p),l:'1 number'},{t:/[-_!@#$%^&*(){}+=~`|:;<>,./\\?]/.test(p),l:'1 special'}];
-    el.innerHTML=c.map(x=>`<span style="color:${x.t?'var(--green)':'var(--red)'};">${x.t?'✓':'✗'} ${x.l}</span>`).join(' &nbsp; ');
-    return c.every(x=>x.t);
+    const c=[{t:p.length>=15,l:'15+ chars'},{t:/[A-Z]/.test(p),l:'1 upper'},{t:/[a-z]/.test(p),l:'1 lower'},{t:/[0-9]/.test(p),l:'1 number'},{t:/[-_!@#$%^&*(){}+=~|:;<>,./\\?]/.test(p),l:'1 special'}];
+    var h='';c.forEach(function(x){h+='<span style="color:'+(x.t?'var(--green)':'var(--red)')+';">'+(x.t?'\u2713':'\u2717')+' '+x.l+'</span> &nbsp; '});
+    el.innerHTML=h;
+    return c.every(function(x){return x.t});
 }
 
 async function startDeploy(){
@@ -826,7 +866,7 @@ function pollDeployLog(){
         try{const r=await fetch('/api/deploy/log?after='+logIndex);const d=await r.json();pollFails=0;
             if(d.entries.length>0){d.entries.forEach(e=>{const l=document.createElement('div');if(e.includes('✓'))l.style.color='var(--green)';else if(e.includes('✗')||e.includes('FATAL'))l.style.color='var(--red)';else if(e.includes('━━━'))l.style.color='var(--cyan)';else if(e.includes('⚠'))l.style.color='var(--yellow)';else if(e.includes('===')||e.includes('WebGUI')||e.includes('Username'))l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
             if(d.running)setTimeout(poll,1000);
-            else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';const wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';wa.innerHTML='<div style="font-family:JetBrains Mono,monospace;font-size:14px;color:var(--cyan);margin-bottom:12px">\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.</div><button onclick="window.location.href=\'/takserver\'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:DM Sans,sans-serif;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>';document.getElementById('deploy-log-area').after(wa)}
+            else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';var wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';var wt=document.createElement('div');wt.style.cssText='font-family:JetBrains Mono,monospace;font-size:14px;color:#06b6d4;margin-bottom:12px';wt.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.';var wb=document.createElement('button');wb.textContent='Refresh Page';wb.style.cssText='padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer';wb.onclick=function(){window.location.href='/takserver'};wa.appendChild(wt);wa.appendChild(wb);document.getElementById('deploy-log-area').after(wa)}
             else if(d.error){const b=document.getElementById('deploy-btn');b.textContent='✗ Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}
         }catch(e){pollFails++;if(pollFails<30)setTimeout(poll,2000)}
     };poll();
