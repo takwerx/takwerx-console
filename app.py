@@ -528,7 +528,7 @@ def run_takserver_deploy(config):
         log_step(f"Creating Root CA: {root_ca}...")
         run_command(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1')
         log_step(f"Creating Intermediate CA: {int_ca}...")
-        run_command(f'cd /opt/tak/certs && echo -e "y\\n" | sudo -u tak ./makeCert.sh ca "{int_ca}" 2>&1')
+        run_command(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh ca "{int_ca}" 2>&1')
         log_step("Creating server certificate...")
         run_command('cd /opt/tak/certs && sudo -u tak ./makeCert.sh server takserver 2>&1')
         log_step("Creating admin certificate...")
@@ -1659,27 +1659,27 @@ DASHBOARD_TEMPLATE = '''
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                         <div class="form-field">
                             <label>Country (2 letters)</label>
-                            <input type="text" id="cert_country" value="US" maxlength="2"
+                            <input type="text" id="cert_country" placeholder="US" maxlength="2"
                                    style="text-transform: uppercase;">
                         </div>
                         <div class="form-field">
                             <label>State/Province</label>
-                            <input type="text" id="cert_state" value="CA"
+                            <input type="text" id="cert_state" placeholder="CA"
                                    style="text-transform: uppercase;">
                         </div>
                         <div class="form-field">
                             <label>City</label>
-                            <input type="text" id="cert_city" value="SACRAMENTO"
+                            <input type="text" id="cert_city" placeholder="SACRAMENTO"
                                    style="text-transform: uppercase;">
                         </div>
                         <div class="form-field">
                             <label>Organization</label>
-                            <input type="text" id="cert_org" value="TAK"
+                            <input type="text" id="cert_org" placeholder="MYAGENCY"
                                    style="text-transform: uppercase;">
                         </div>
                         <div class="form-field">
                             <label>Organizational Unit</label>
-                            <input type="text" id="cert_ou" value="TAK"
+                            <input type="text" id="cert_ou" placeholder="IT"
                                    style="text-transform: uppercase;">
                         </div>
                     </div>
@@ -1690,12 +1690,12 @@ DASHBOARD_TEMPLATE = '''
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
                         <div class="form-field">
                             <label>Root CA Name</label>
-                            <input type="text" id="root_ca_name" value="ROOT-CA-01"
+                            <input type="text" id="root_ca_name" placeholder="ROOT-CA-01"
                                    style="text-transform: uppercase;">
                         </div>
                         <div class="form-field">
                             <label>Intermediate CA Name</label>
-                            <input type="text" id="intermediate_ca_name" value="INTERMEDIATE-CA-01"
+                            <input type="text" id="intermediate_ca_name" placeholder="INTERMEDIATE-CA-01"
                                    style="text-transform: uppercase;">
                         </div>
                     </div>
@@ -1730,9 +1730,17 @@ DASHBOARD_TEMPLATE = '''
                                     color: var(--text-dim); margin-bottom: 12px;">
                             Set a password for the <span style="color: var(--cyan);">webadmin</span> user to log in on port 8446
                         </div>
-                        <div class="form-field">
-                            <label>WebAdmin Password</label>
-                            <input type="password" id="webadmin_password" placeholder="Min 15 chars: upper, lower, number, special">
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <div class="form-field">
+                                <label>WebAdmin Password</label>
+                                <input type="text" id="webadmin_password" placeholder="Min 15 chars"
+                                       autocomplete="off" spellcheck="false">
+                            </div>
+                            <div class="form-field">
+                                <label>Confirm Password</label>
+                                <input type="text" id="webadmin_password_confirm" placeholder="Type again to confirm"
+                                       autocomplete="off" spellcheck="false">
+                            </div>
                         </div>
                         <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px;
                                     color: var(--text-dim); margin-top: 8px;">
@@ -1835,8 +1843,10 @@ DASHBOARD_TEMPLATE = '''
 
             // Add password validation listener
             const passInput = document.getElementById('webadmin_password');
+            const passConfirm = document.getElementById('webadmin_password_confirm');
             if (passInput) {
                 passInput.addEventListener('input', validatePassword);
+                passConfirm.addEventListener('input', validatePassword);
             }
         }
 
@@ -1848,32 +1858,66 @@ DASHBOARD_TEMPLATE = '''
 
         function validatePassword() {
             const pass = document.getElementById('webadmin_password').value;
+            const confirm = document.getElementById('webadmin_password_confirm').value;
             const el = document.getElementById('password-validation');
             if (!pass) { el.innerHTML = ''; return false; }
 
             const checks = [
-                { test: pass.length >= 15, label: '15+ characters' },
-                { test: /[A-Z]/.test(pass), label: '1 uppercase' },
-                { test: /[a-z]/.test(pass), label: '1 lowercase' },
-                { test: /[0-9]/.test(pass), label: '1 number' },
-                { test: /[-_!@#$%^&*(){}[\]+=~`|:;<>,./\\?]/.test(pass), label: '1 special char' },
+                { test: pass.length >= 15, label: '15+ chars' },
+                { test: /[A-Z]/.test(pass), label: 'uppercase' },
+                { test: /[a-z]/.test(pass), label: 'lowercase' },
+                { test: /[0-9]/.test(pass), label: 'number' },
+                { test: /[-_!@#$%^&*(){}[\]+=~`|:;<>,./\\?]/.test(pass), label: 'special' },
             ];
 
             let html = checks.map(c =>
                 `<span style="color: ${c.test ? 'var(--green)' : 'var(--red)'};">${c.test ? '✓' : '✗'} ${c.label}</span>`
             ).join(' &nbsp; ');
 
+            if (confirm && pass !== confirm) {
+                html += ' &nbsp; <span style="color: var(--red);">✗ passwords don\'t match</span>';
+            } else if (confirm && pass === confirm) {
+                html += ' &nbsp; <span style="color: var(--green);">✓ match</span>';
+            }
+
             el.innerHTML = html;
-            return checks.every(c => c.test);
+            return checks.every(c => c.test) && pass === confirm;
         }
 
         async function startDeploy() {
+            // Validate all required fields are filled
+            const requiredFields = [
+                {id: 'cert_country', label: 'Country'},
+                {id: 'cert_state', label: 'State/Province'},
+                {id: 'cert_city', label: 'City'},
+                {id: 'cert_org', label: 'Organization'},
+                {id: 'cert_ou', label: 'Organizational Unit'},
+                {id: 'root_ca_name', label: 'Root CA Name'},
+                {id: 'intermediate_ca_name', label: 'Intermediate CA Name'},
+            ];
+            const empty = requiredFields.filter(f => !document.getElementById(f.id).value.trim());
+            if (empty.length > 0) {
+                alert('Please fill in all fields:\\n\\n' + empty.map(f => '  • ' + f.label).join('\\n'));
+                // Highlight empty fields
+                empty.forEach(f => {
+                    const el = document.getElementById(f.id);
+                    el.style.borderColor = 'var(--red)';
+                    el.addEventListener('input', () => el.style.borderColor = '', {once: true});
+                });
+                return;
+            }
+
             // Validate webadmin password if Admin UI is checked
             const adminUIChecked = document.getElementById('enable_admin_ui').checked;
             if (adminUIChecked) {
                 const pass = document.getElementById('webadmin_password').value;
+                const confirm = document.getElementById('webadmin_password_confirm').value;
                 if (!pass) {
                     alert('Please set a password for the webadmin user.');
+                    return;
+                }
+                if (pass !== confirm) {
+                    alert('Passwords do not match.');
                     return;
                 }
                 if (!validatePassword()) {
