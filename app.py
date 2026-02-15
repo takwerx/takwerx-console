@@ -242,7 +242,7 @@ def api_modules():
 @app.route('/api/upload/takserver', methods=['POST'])
 @login_required
 def upload_takserver_package():
-    """Handle TAK Server file uploads (.deb/.rpm, GPG key, policy file)"""
+    """Handle TAK Server file uploads - accepts any combination of files"""
     if 'files' not in request.files:
         return jsonify({'error': 'No files uploaded'}), 400
 
@@ -253,12 +253,10 @@ def upload_takserver_package():
     settings = load_settings()
     os_type = settings.get('os_type', '')
 
-    # Allowed file patterns
     results = {
         'package': None,
         'gpg_key': None,
         'policy': None,
-        'unknown': []
     }
 
     for f in files:
@@ -271,7 +269,6 @@ def upload_takserver_package():
         size_mb = round(os.path.getsize(filepath) / (1024*1024), 1)
 
         if filename.endswith('.deb'):
-            # Validate OS match
             if 'rocky' in os_type:
                 os.remove(filepath)
                 return jsonify({
@@ -304,13 +301,10 @@ def upload_takserver_package():
             }
 
         else:
-            results['unknown'].append(filename)
+            # Unknown file type - save it anyway, don't error
+            pass
 
-    if not results['package']:
-        return jsonify({
-            'error': 'No .deb or .rpm package found in uploaded files'
-        }), 400
-
+    # Return whatever we got - don't require .deb in every request
     return jsonify({
         'success': True,
         'package': results['package'],
