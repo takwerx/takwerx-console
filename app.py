@@ -145,6 +145,41 @@ def takserver_control():
     s = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True)
     return jsonify({'success': True, 'running': s.stdout.strip() == 'active', 'action': action})
 
+@app.route('/api/takserver/uninstall', methods=['POST'])
+@login_required
+def takserver_uninstall():
+    """Remove TAK Server, clean up, ready for fresh deploy"""
+    data = request.json or {}
+    password = data.get('password', '')
+    auth = load_auth()
+    if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+        return jsonify({'error': 'Invalid admin password'}), 403
+    steps = []
+    # Stop service
+    subprocess.run(['systemctl', 'stop', 'takserver'], capture_output=True, timeout=60)
+    subprocess.run(['systemctl', 'disable', 'takserver'], capture_output=True, timeout=30)
+    steps.append('Stopped TAK Server')
+    # Kill any remaining processes
+    subprocess.run('pkill -9 -f takserver 2>/dev/null; true', shell=True, capture_output=True)
+    steps.append('Killed remaining processes')
+    # Remove package
+    pkg_result = subprocess.run('dpkg -l | grep takserver', shell=True, capture_output=True, text=True)
+    if 'takserver' in pkg_result.stdout:
+        subprocess.run('DEBIAN_FRONTEND=noninteractive apt-get remove -y takserver 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
+        steps.append('Removed TAK Server package')
+    # Clean up /opt/tak
+    if os.path.exists('/opt/tak'):
+        subprocess.run('rm -rf /opt/tak', shell=True, capture_output=True)
+        steps.append('Removed /opt/tak')
+    # Clean up uploads so user can upload fresh
+    for f in os.listdir(UPLOAD_DIR):
+        os.remove(os.path.join(UPLOAD_DIR, f))
+    steps.append('Cleared uploads')
+    # Reset deploy status
+    deploy_log.clear()
+    deploy_status.update({'running': False, 'complete': False, 'error': False})
+    return jsonify({'success': True, 'steps': steps})
+
 @app.route('/api/upload/takserver', methods=['POST'])
 @login_required
 def upload_takserver_package():
@@ -305,15 +340,15 @@ def run_takserver_deploy(config):
             run_cmd(f'sed -i "s/{old}/{new}/g" /opt/tak/certs/cert-metadata.sh', check=False)
         run_cmd('chown -R tak:tak /opt/tak/certs/')
         log_step(f"Creating Root CA: {root_ca}...")
-        run_cmd(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1')
+        run_cmd(f'cd /opt/tak/certs && echo "{root_ca}" | sudo -u tak ./makeRootCa.sh 2>&1', quiet=True)
         log_step(f"Creating Intermediate CA: {int_ca}...")
-        run_cmd(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh ca "{int_ca}" 2>&1')
+        run_cmd(f'cd /opt/tak/certs && echo "y" | sudo -u tak ./makeCert.sh ca "{int_ca}" 2>&1', quiet=True)
         log_step("Creating server certificate...")
-        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh server takserver 2>&1')
+        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh server takserver 2>&1', quiet=True)
         log_step("Creating admin certificate...")
-        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client admin 2>&1')
+        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client admin 2>&1', quiet=True)
         log_step("Creating user certificate...")
-        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1')
+        run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1', quiet=True)
         log_step("✓ All certificates created")
         log_step("Restarting TAK Server...")
         run_cmd('systemctl stop takserver'); time.sleep(10)
@@ -390,6 +425,32 @@ def download_truststore():
             if f.startswith('truststore-') and f.endswith('.p12') and 'root' not in f:
                 return send_from_directory(p, f, as_attachment=True)
     return jsonify({'error': 'truststore not found'}), 404
+
+@app.route('/api/certs/list')
+@login_required
+def list_cert_files():
+    cert_path = '/opt/tak/certs/files'
+    if not os.path.exists(cert_path):
+        return jsonify({'files': []})
+    files = []
+    for f in sorted(os.listdir(cert_path)):
+        fp = os.path.join(cert_path, f)
+        if os.path.isfile(fp):
+            files.append({'name': f, 'size': os.path.getsize(fp),
+                'size_display': f"{os.path.getsize(fp)/1024:.1f} KB" if os.path.getsize(fp) < 1024*1024 else f"{os.path.getsize(fp)/(1024*1024):.1f} MB"})
+    return jsonify({'files': files})
+
+@app.route('/api/certs/download/<filename>')
+@login_required
+def download_cert_file(filename):
+    import re
+    if not re.match(r'^[a-zA-Z0-9._-]+$', filename):
+        return jsonify({'error': 'Invalid filename'}), 400
+    cert_path = '/opt/tak/certs/files'
+    fp = os.path.join(cert_path, filename)
+    if os.path.exists(fp) and os.path.isfile(fp):
+        return send_from_directory(cert_path, filename, as_attachment=True)
+    return jsonify({'error': 'File not found'}), 404
 
 @app.route('/api/deploy/log')
 @login_required
@@ -542,24 +603,27 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="status-banner" id="status-banner">
 {% if tak.installed and tak.running %}
 <div class="status-info"><div class="status-icon running">🗺️</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
-<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button></div>
+<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
 <div class="status-info"><div class="status-icon stopped">🗺️</div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running</div></div></div>
-<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button></div>
+<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
 <div class="status-info"><div class="status-icon not-installed">🗺️</div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
 {% endif %}
 </div>
 
 {% if tak.installed %}
+<div class="section-title">Access</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+<a href="https://{{ settings.get('server_ip', '') }}:8443" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none">🔐 WebGUI :8443 (cert)</a>
+<a href="https://{{ settings.get('server_ip', '') }}:8446" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none">🔑 WebGUI :8446 (password)</a>
+</div>
+</div>
 <div class="section-title">Certificates</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div class="cert-downloads">
-<a href="/api/download/admin-cert" class="cert-btn cert-btn-primary">⬇ admin.p12</a>
-<a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a>
-<a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a>
-</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:16px">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;·&nbsp; /opt/tak/certs/files/</div>
+<div id="cert-file-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading...</div>
 </div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
@@ -596,11 +660,44 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 </main>
 <footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type', '') }} · {{ settings.get('server_ip', '') }}</footer>
 <script>
+async function loadCertFiles(){
+    const el=document.getElementById('cert-file-list');
+    if(!el)return;
+    try{
+        const r=await fetch('/api/certs/list');const d=await r.json();
+        if(!d.files||d.files.length===0){el.innerHTML='<span style="color:var(--text-dim)">No certificate files found</span>';return}
+        let h='<table style="width:100%;border-collapse:collapse">';
+        d.files.forEach(f=>{
+            const ext=f.name.split('.').pop().toLowerCase();
+            const icon=ext==='p12'?'🔑':ext==='pem'?'📄':ext==='jks'?'☕':ext==='crt'?'📜':'📁';
+            h+='<tr style="border-bottom:1px solid var(--border)">';
+            h+='<td style="padding:8px 4px">'+icon+'</td>';
+            h+='<td style="padding:8px 4px;color:var(--text-secondary)">'+f.name+'</td>';
+            h+='<td style="padding:8px 4px;color:var(--text-dim);text-align:right">'+f.size_display+'</td>';
+            h+='<td style="padding:8px 4px;text-align:right"><a href="/api/certs/download/'+f.name+'" style="color:var(--accent);text-decoration:none;font-size:12px">⬇</a></td>';
+            h+='</tr>'});
+        h+='</table>';
+        el.innerHTML=h;
+    }catch(e){el.innerHTML='<span style="color:var(--red)">Failed to load</span>'}
+}
+loadCertFiles();
+
 async function takControl(action){
     const btns=document.querySelectorAll('.control-btn');
     btns.forEach(b=>{b.disabled=true;b.style.opacity='0.5'});
     try{await fetch('/api/takserver/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});window.location.reload()}
     catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
+}
+
+async function takUninstall(){
+    if(!confirm('Remove TAK Server completely? This will delete /opt/tak, all certificates, and all config. You can redeploy after.'))return;
+    const pw=prompt('Enter admin password to confirm removal:');
+    if(!pw)return;
+    const btns=document.querySelectorAll('.control-btn');
+    btns.forEach(b=>{b.disabled=true;b.style.opacity='0.5'});
+    try{const r=await fetch('/api/takserver/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});const d=await r.json();if(d.success){alert('TAK Server removed. Page will reload.');window.location.href='/takserver'}else{alert('Error: '+(d.error||'Unknown'))}}
+    catch(e){alert('Failed: '+e.message)}
+    btns.forEach(b=>{b.disabled=false;b.style.opacity='1'});
 }
 
 let uploadedFiles={package:null,gpg_key:null,policy:null};
@@ -680,19 +777,25 @@ function showDeployConfig(){
 </div>
 <div id="webadmin-password-area" style="display:none;margin-top:20px;background:rgba(59,130,246,0.05);border:1px solid var(--border);border-radius:10px;padding:18px">
 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:12px">Set a password for <span style="color:var(--cyan)">webadmin</span> user on port 8446</div>
-<div class="form-field"><label>WebAdmin Password</label><input type="password" id="webadmin_password" placeholder="Min 15 chars: upper, lower, number, special"></div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">15+ characters, 1 uppercase, 1 lowercase, 1 number, 1 special character</div>
+<div class="form-field" style="margin-bottom:12px"><label>WebAdmin Password</label><div style="position:relative"><input type="password" id="webadmin_password" placeholder="Min 15 chars: upper, lower, number, special"><button type="button" onclick="toggleShowPassword()" id="pw-toggle" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:13px;font-family:JetBrains Mono,monospace">show</button></div></div>
+<div class="form-field" style="margin-bottom:12px"><label>Confirm Password</label><input type="password" id="webadmin_password_confirm" placeholder="Re-enter password"></div>
+<div id="password-match" style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-bottom:8px"></div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">15+ characters, 1 uppercase, 1 lowercase, 1 number, 1 special character</div>
 <div id="password-validation" style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-top:8px"></div>
 </div>
 <div style="margin-top:28px;text-align:center"><button onclick="startDeploy()" id="deploy-btn" style="padding:14px 48px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">🚀 Deploy TAK Server</button></div>
 </div>
 <div id="deploy-log-area" style="display:none"><div class="section-title">Deployment Log</div><div id="deploy-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);max-height:500px;overflow-y:auto;line-height:1.7;white-space:pre-wrap"></div></div>
-<div id="cert-download-area" style="display:none;margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-primary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>`;
+<div id="cert-download-area" style="display:none;margin-top:20px"><div class="section-title">Download Certificates</div><div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px"><div class="cert-downloads"><a href="/api/download/admin-cert" class="cert-btn cert-btn-secondary">⬇ admin.p12</a><a href="/api/download/user-cert" class="cert-btn cert-btn-secondary">⬇ user.p12</a><a href="/api/download/truststore" class="cert-btn cert-btn-secondary">⬇ truststore.p12</a></div><div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-top:12px">Certificate password: <span style="color:var(--cyan)">atakatak</span></div></div></div>`;
     main.appendChild(cd);
-    const pi=document.getElementById('webadmin_password');if(pi)pi.addEventListener('input',validatePassword);
+    const pi=document.getElementById('webadmin_password');if(pi){pi.addEventListener('input',validatePassword);pi.addEventListener('input',checkPasswordMatch)}const pc=document.getElementById('webadmin_password_confirm');if(pc)pc.addEventListener('input',checkPasswordMatch);
 }
 
 function toggleWebadminPassword(){const a=document.getElementById('webadmin-password-area');if(a)a.style.display=document.getElementById('enable_admin_ui').checked?'block':'none'}
+
+function toggleShowPassword(){const p=document.getElementById('webadmin_password');const c=document.getElementById('webadmin_password_confirm');const b=document.getElementById('pw-toggle');if(p.type==='password'){p.type='text';c.type='text';b.textContent='hide'}else{p.type='password';c.type='password';b.textContent='show'}}
+
+function checkPasswordMatch(){const p=document.getElementById('webadmin_password').value;const c=document.getElementById('webadmin_password_confirm').value;const el=document.getElementById('password-match');if(!c){el.innerHTML='';return}if(p===c)el.innerHTML='<span style="color:var(--green)">\u2713 Passwords match</span>';else el.innerHTML='<span style="color:var(--red)">\u2717 Passwords do not match</span>'}
 
 function validatePassword(){
     const p=document.getElementById('webadmin_password').value;const el=document.getElementById('password-validation');
@@ -705,9 +808,9 @@ function validatePassword(){
 async function startDeploy(){
     const rf=[{id:'cert_country',l:'Country'},{id:'cert_state',l:'State'},{id:'cert_city',l:'City'},{id:'cert_org',l:'Organization'},{id:'cert_ou',l:'Org Unit'},{id:'root_ca_name',l:'Root CA'},{id:'intermediate_ca_name',l:'Intermediate CA'}];
     const empty=rf.filter(f=>!document.getElementById(f.id).value.trim());
-    if(empty.length>0){alert('Please fill in all fields:\n\n'+empty.map(f=>'  • '+f.l).join('\n'));empty.forEach(f=>{const el=document.getElementById(f.id);el.style.borderColor='var(--red)';el.addEventListener('input',()=>el.style.borderColor='',{once:true})});return}
+    if(empty.length>0){alert('Please fill in: '+empty.map(f=>f.l).join(', '));empty.forEach(f=>{const el=document.getElementById(f.id);el.style.borderColor='var(--red)';el.addEventListener('input',()=>el.style.borderColor='',{once:true})});return}
     const aui=document.getElementById('enable_admin_ui').checked;
-    if(aui){const p=document.getElementById('webadmin_password').value;if(!p){alert('Please set a webadmin password.');return}if(!validatePassword()){alert('Password does not meet requirements.');return}}
+    if(aui){const p=document.getElementById('webadmin_password').value;const pc=document.getElementById('webadmin_password_confirm').value;if(!p){alert('Please set a webadmin password.');return}if(p!==pc){alert('Passwords do not match.');return}if(!validatePassword()){alert('Password does not meet requirements.');return}}
     const btn=document.getElementById('deploy-btn');btn.disabled=true;btn.textContent='Deploying...';btn.style.opacity='0.6';btn.style.cursor='not-allowed';
     document.querySelectorAll('.form-field input,input[type="checkbox"]').forEach(el=>el.disabled=true);
     const cfg={cert_country:document.getElementById('cert_country').value.toUpperCase(),cert_state:document.getElementById('cert_state').value.toUpperCase(),cert_city:document.getElementById('cert_city').value.toUpperCase(),cert_org:document.getElementById('cert_org').value.toUpperCase(),cert_ou:document.getElementById('cert_ou').value.toUpperCase(),root_ca_name:document.getElementById('root_ca_name').value.toUpperCase(),intermediate_ca_name:document.getElementById('intermediate_ca_name').value.toUpperCase(),enable_admin_ui:document.getElementById('enable_admin_ui').checked,enable_webtak:document.getElementById('enable_webtak').checked,enable_nonadmin_ui:document.getElementById('enable_nonadmin_ui').checked,webadmin_password:aui?document.getElementById('webadmin_password').value:''};
@@ -723,7 +826,7 @@ function pollDeployLog(){
         try{const r=await fetch('/api/deploy/log?after='+logIndex);const d=await r.json();pollFails=0;
             if(d.entries.length>0){d.entries.forEach(e=>{const l=document.createElement('div');if(e.includes('✓'))l.style.color='var(--green)';else if(e.includes('✗')||e.includes('FATAL'))l.style.color='var(--red)';else if(e.includes('━━━'))l.style.color='var(--cyan)';else if(e.includes('⚠'))l.style.color='var(--yellow)';else if(e.includes('===')||e.includes('WebGUI')||e.includes('Username'))l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
             if(d.running)setTimeout(poll,1000);
-            else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='✓ Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block'}
+            else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';const wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';wa.innerHTML='<div style="font-family:JetBrains Mono,monospace;font-size:14px;color:var(--cyan);margin-bottom:12px">\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.</div><button onclick="window.location.href=\'/takserver\'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:DM Sans,sans-serif;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>';document.getElementById('deploy-log-area').after(wa)}
             else if(d.error){const b=document.getElementById('deploy-btn');b.textContent='✗ Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}
         }catch(e){pollFails++;if(pollFails<30)setTimeout(poll,2000)}
     };poll();
