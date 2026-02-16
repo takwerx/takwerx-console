@@ -128,6 +128,90 @@ def guarddog_page():
 def caddy_page():
     return redirect(url_for('dashboard'))
 
+@app.route('/certs')
+@login_required
+def certs_page():
+    settings = load_settings()
+    cert_dir = '/opt/tak/certs/files'
+    files = []
+    if os.path.isdir(cert_dir):
+        for fn in sorted(os.listdir(cert_dir)):
+            fp = os.path.join(cert_dir, fn)
+            if os.path.isfile(fp):
+                sz = os.path.getsize(fp)
+                if sz < 1024: sz_d = f"{sz} B"
+                elif sz < 1048576: sz_d = f"{round(sz/1024,1)} KB"
+                else: sz_d = f"{round(sz/1048576,1)} MB"
+                ext = fn.split('.')[-1].lower() if '.' in fn else ''
+                icon = {'p12':'🔑','pem':'📄','jks':'☕','crt':'📜','key':'🔐','crl':'📋','csr':'📝'}.get(ext, '📁')
+                files.append({'name': fn, 'size': sz_d, 'icon': icon, 'ext': ext})
+    return render_template_string(CERTS_TEMPLATE, settings=settings, files=files, version=VERSION)
+
+CERTS_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Certificates · TAKWERX Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
+.top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
+.header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
+.header-left{display:flex;align-items:center;gap:16px}.header-icon{font-size:28px}.header-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.5px}.header-subtitle{font-size:13px;color:var(--text-dim)}
+.header-right{display:flex;align-items:center;gap:12px}
+.btn-back{color:var(--text-dim);text-decoration:none;font-size:13px;padding:6px 14px;border:1px solid var(--border);border-radius:6px;transition:all 0.2s}.btn-back:hover{color:var(--text-secondary);border-color:var(--border-hover)}
+.main{max-width:1000px;margin:0 auto;padding:32px 40px}
+.section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px}
+.cert-table{width:100%;border-collapse:collapse}
+.cert-table tr{border-bottom:1px solid var(--border);transition:background 0.15s}
+.cert-table tr:hover{background:rgba(59,130,246,0.05)}
+.cert-table td{padding:12px 8px;font-family:'JetBrains Mono',monospace;font-size:13px}
+.cert-icon{width:30px;text-align:center}
+.cert-name{color:var(--text-secondary)}
+.cert-size{color:var(--text-dim);text-align:right;width:80px}
+.cert-dl{text-align:right;width:40px}
+.cert-dl a{color:var(--accent);text-decoration:none;font-size:14px;padding:4px 8px;border-radius:4px;transition:background 0.15s}
+.cert-dl a:hover{background:rgba(59,130,246,0.1)}
+.info-bar{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:20px}
+.info-bar span{color:var(--cyan)}
+.filter-btns{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+.filter-btn{padding:6px 14px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;transition:all 0.2s}
+.filter-btn:hover,.filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(59,130,246,0.05)}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+</style></head><body>
+<div class="top-bar"></div>
+<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Certificates</div></div></div><div class="header-right"><a href="/takserver" class="btn-back">← TAK Server</a></div></header>
+<main class="main">
+<div class="section-title">Certificate Files</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px">
+<div class="info-bar">Password: <span>atakatak</span> &nbsp;&middot;&nbsp; {{ files|length }} files in /opt/tak/certs/files/</div>
+<div class="filter-btns">
+<button class="filter-btn active" onclick="filterCerts('all')">All</button>
+<button class="filter-btn" onclick="filterCerts('p12')">🔑 .p12</button>
+<button class="filter-btn" onclick="filterCerts('pem')">📄 .pem</button>
+<button class="filter-btn" onclick="filterCerts('jks')">☕ .jks</button>
+<button class="filter-btn" onclick="filterCerts('key')">🔐 .key</button>
+<button class="filter-btn" onclick="filterCerts('other')">Other</button>
+</div>
+<table class="cert-table">
+{% for f in files %}
+<tr data-ext="{{ f.ext }}"><td class="cert-icon">{{ f.icon }}</td><td class="cert-name">{{ f.name }}</td><td class="cert-size">{{ f.size }}</td><td class="cert-dl"><a href="/api/certs/download/{{ f.name }}" title="Download">⬇</a></td></tr>
+{% endfor %}
+</table>
+</div>
+</main>
+<footer class="footer">TAKWERX Console v{{ version }}</footer>
+<script>
+function filterCerts(ext){
+    document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('.cert-table tr').forEach(r=>{
+        if(ext==='all')r.style.display='';
+        else if(ext==='other')r.style.display=['p12','pem','jks','key'].includes(r.dataset.ext)?'none':'';
+        else r.style.display=r.dataset.ext===ext?'':'none';
+    });
+}
+</script>
+</body></html>'''
+
 # === API Routes ===
 
 @app.route('/api/metrics')
@@ -145,6 +229,108 @@ def takserver_control():
     time.sleep(3)
     s = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True)
     return jsonify({'success': True, 'running': s.stdout.strip() == 'active', 'action': action})
+
+@app.route('/api/takserver/log')
+@login_required
+def takserver_log():
+    """Tail the takserver-messaging.log file"""
+    log_path = '/opt/tak/logs/takserver-messaging.log'
+    offset = request.args.get('offset', 0, type=int)
+    lines = request.args.get('lines', 100, type=int)
+    if not os.path.exists(log_path):
+        return jsonify({'entries': [], 'offset': 0, 'size': 0})
+    try:
+        size = os.path.getsize(log_path)
+        if offset == 0:
+            r = subprocess.run(f'tail -n {lines} "{log_path}"', shell=True, capture_output=True, text=True, timeout=10)
+            entries = r.stdout.strip().split('\n') if r.stdout.strip() else []
+            return jsonify({'entries': entries, 'offset': size, 'size': size})
+        elif size > offset:
+            with open(log_path, 'r') as f:
+                f.seek(offset)
+                new_data = f.read()
+            entries = new_data.strip().split('\n') if new_data.strip() else []
+            return jsonify({'entries': entries, 'offset': size, 'size': size})
+        else:
+            return jsonify({'entries': [], 'offset': offset, 'size': size})
+    except Exception as e:
+        return jsonify({'entries': [f'Error reading log: {str(e)}'], 'offset': offset, 'size': 0})
+
+@app.route('/api/takserver/services')
+@login_required
+def takserver_services():
+    """Get TAK Server Java process status"""
+    services = []
+    try:
+        r = subprocess.run("ps aux | grep java | grep -v grep", shell=True, capture_output=True, text=True, timeout=10)
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip(): continue
+            parts = line.split()
+            if len(parts) < 11: continue
+            pid = parts[1]
+            cpu = parts[2]
+            mem_pct = parts[3]
+            rss_kb = int(parts[5])
+            mem_mb = round(rss_kb / 1024)
+            cmd = ' '.join(parts[10:])
+            # Identify the service
+            if 'profiles.active=messaging' in cmd:
+                name = 'Messaging'
+                icon = '📡'
+            elif 'profiles.active=api' in cmd:
+                name = 'API'
+                icon = '🔌'
+            elif 'profiles.active=config' in cmd:
+                name = 'Config'
+                icon = '⚙️'
+            elif 'takserver-pm.jar' in cmd:
+                name = 'Plugin Manager'
+                icon = '🧩'
+            elif 'takserver-retention.jar' in cmd:
+                name = 'Retention'
+                icon = '📦'
+            else:
+                name = 'Unknown'
+                icon = '❓'
+            services.append({
+                'name': name, 'icon': icon, 'pid': pid,
+                'cpu': f"{cpu}%", 'mem_mb': f"{mem_mb} MB",
+                'mem_pct': f"{mem_pct}%", 'status': 'running'
+            })
+        # Check PostgreSQL
+        pg = subprocess.run("systemctl is-active postgresql", shell=True, capture_output=True, text=True, timeout=5)
+        services.append({
+            'name': 'PostgreSQL', 'icon': '🐘', 'pid': '',
+            'cpu': '', 'mem_mb': '', 'mem_pct': '',
+            'status': 'running' if pg.stdout.strip() == 'active' else 'stopped'
+        })
+    except Exception as e:
+        services.append({'name': 'Error', 'icon': '❌', 'status': str(e)})
+    return jsonify({'services': services, 'count': len([s for s in services if s['status'] == 'running'])})
+    """Tail the takserver-messaging.log file"""
+    log_path = '/opt/tak/logs/takserver-messaging.log'
+    offset = request.args.get('offset', 0, type=int)
+    lines = request.args.get('lines', 100, type=int)
+    if not os.path.exists(log_path):
+        return jsonify({'entries': [], 'offset': 0, 'size': 0})
+    try:
+        size = os.path.getsize(log_path)
+        if offset == 0:
+            # First load: grab last N lines
+            r = subprocess.run(f'tail -n {lines} "{log_path}"', shell=True, capture_output=True, text=True, timeout=10)
+            entries = r.stdout.strip().split('\n') if r.stdout.strip() else []
+            return jsonify({'entries': entries, 'offset': size, 'size': size})
+        elif size > offset:
+            # New content since last poll
+            with open(log_path, 'r') as f:
+                f.seek(offset)
+                new_data = f.read()
+            entries = new_data.strip().split('\n') if new_data.strip() else []
+            return jsonify({'entries': entries, 'offset': size, 'size': size})
+        else:
+            return jsonify({'entries': [], 'offset': offset, 'size': size})
+    except Exception as e:
+        return jsonify({'entries': [f'Error reading log: {str(e)}'], 'offset': offset, 'size': 0})
 
 @app.route('/api/takserver/uninstall', methods=['POST'])
 @login_required
@@ -172,6 +358,10 @@ def takserver_uninstall():
     if os.path.exists('/opt/tak'):
         subprocess.run('rm -rf /opt/tak', shell=True, capture_output=True)
         steps.append('Removed /opt/tak')
+    # Clean up PostgreSQL database and user (so redeploys start clean)
+    subprocess.run("sudo -u postgres psql -c \"DROP DATABASE IF EXISTS cot;\" 2>/dev/null; true", shell=True, capture_output=True, timeout=30)
+    subprocess.run("sudo -u postgres psql -c \"DROP USER IF EXISTS martiuser;\" 2>/dev/null; true", shell=True, capture_output=True, timeout=30)
+    steps.append('Cleaned up PostgreSQL (cot database, martiuser)')
     # Clean up uploads so user can upload fresh
     for f in os.listdir(UPLOAD_DIR):
         os.remove(os.path.join(UPLOAD_DIR, f))
@@ -214,10 +404,52 @@ def upload_takserver_package():
     return jsonify({'success': True, **results,
         'has_verification': results['gpg_key'] is not None and results['policy'] is not None})
 
+@app.route('/api/upload/takserver/delete', methods=['POST'])
+@login_required
+def delete_uploaded_file():
+    fn = request.json.get('filename', '')
+    import re
+    if not fn or not re.match(r'^[a-zA-Z0-9._-]+$', fn):
+        return jsonify({'error': 'Invalid filename'}), 400
+    fp = os.path.join(UPLOAD_DIR, fn)
+    if os.path.exists(fp):
+        os.remove(fp)
+        return jsonify({'success': True, 'filename': fn})
+    return jsonify({'error': 'File not found'}), 404
+
+@app.route('/api/upload/takserver/existing')
+@login_required
+def check_existing_uploads():
+    """Check for files already uploaded from a previous session"""
+    files = {}
+    for fn in os.listdir(UPLOAD_DIR):
+        fp = os.path.join(UPLOAD_DIR, fn)
+        sz = os.path.getsize(fp)
+        sz_mb = round(sz / (1024*1024), 1)
+        if fn.endswith('.deb') or fn.endswith('.rpm'):
+            files['package'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
+        elif fn.endswith('.key'):
+            files['gpg_key'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
+        elif fn.endswith('.pol'):
+            files['policy'] = {'filename': fn, 'filepath': fp, 'size_mb': sz_mb}
+    return jsonify(files)
+
 # === TAK Server Deployment ===
 
 deploy_log = []
-deploy_status = {'running': False, 'complete': False, 'error': False}
+deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
+
+@app.route('/api/deploy/cancel', methods=['POST'])
+@login_required
+def cancel_deploy():
+    if not deploy_status['running']:
+        return jsonify({'error': 'No deployment in progress'}), 400
+    deploy_status['cancelled'] = True
+    log_step("⚠ Deployment cancelled by user")
+    deploy_status.update({'running': False, 'error': True})
+    # Kill any running subprocess children
+    subprocess.run('pkill -P $$ 2>/dev/null; true', shell=True, capture_output=True)
+    return jsonify({'success': True})
 
 @app.route('/api/deploy/takserver', methods=['POST'])
 @login_required
@@ -252,15 +484,18 @@ def log_step(msg):
     deploy_log.append(entry)
     print(entry, flush=True)
 
-def run_cmd(cmd, desc=None, check=True):
+def run_cmd(cmd, desc=None, check=True, quiet=False):
     if desc: log_step(desc)
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=600)
-        if r.stdout.strip():
-            for line in r.stdout.strip().split('\n'): deploy_log.append(f"  {line}")
-        if r.stderr.strip():
+        if not quiet and r.stdout.strip():
+            for line in r.stdout.strip().split('\n'):
+                if 'NEEDRESTART' not in line:
+                    deploy_log.append(f"  {line}")
+        if not quiet and r.stderr.strip():
             for line in r.stderr.strip().split('\n'):
-                if 'error' in line.lower(): deploy_log.append(f"  ✗ {line}")
+                if 'NEEDRESTART' not in line and 'error' in line.lower():
+                    deploy_log.append(f"  ✗ {line}")
         if check and r.returncode != 0:
             log_step(f"✗ Command failed (exit {r.returncode})")
             return False
@@ -273,7 +508,7 @@ def wait_for_package_lock():
     """Wait for unattended-upgrades to finish (common on fresh VPS).
     NO TIMEOUT - waits as long as needed. Ticks every 10 seconds."""
     log_step("Checking for system upgrades in progress...")
-    r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
+    r = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep', shell=True, capture_output=True, text=True)
     if r.stdout.strip() == '':
         log_step("\u2713 No system upgrades in progress, continuing...")
         return True
@@ -283,7 +518,10 @@ def wait_for_package_lock():
     while True:
         time.sleep(10)
         waited += 10
-        r = subprocess.run('pgrep -f "/usr/bin/unattended-upgrade$"', shell=True, capture_output=True)
+        if deploy_status.get('cancelled'):
+            log_step("⚠ Cancelled during upgrade wait")
+            return False
+        r = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep', shell=True, capture_output=True, text=True)
         if r.stdout.strip() == '':
             m, s = divmod(waited, 60)
             log_step(f"\u2713 System upgrades complete! (waited {m}m {s}s)")
@@ -294,17 +532,19 @@ def wait_for_package_lock():
 
 def run_takserver_deploy(config):
     try:
+        deploy_status['cancelled'] = False
         log_step("=" * 50); log_step("TAK Server Deployment Starting"); log_step("=" * 50)
         pkg = config['package_path']; pkg_name = os.path.basename(pkg)
 
         wait_for_package_lock()
+        if deploy_status.get('cancelled'): return
 
         log_step(""); log_step("━━━ Step 1/9: System Limits ━━━")
         run_cmd('grep -q "soft nofile 32768" /etc/security/limits.conf || echo -e "* soft nofile 32768\\n* hard nofile 32768" >> /etc/security/limits.conf', "Increasing JVM thread limits...")
         log_step("✓ System limits configured")
 
         log_step(""); log_step("━━━ Step 2/9: PostgreSQL Repository ━━━")
-        run_cmd('apt-get install -y lsb-release > /dev/null 2>&1', "Installing prerequisites...", check=False)
+        run_cmd('DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y lsb-release > /dev/null 2>&1', "Installing prerequisites...", check=False)
         run_cmd('install -d /usr/share/postgresql-common/pgdg', check=False)
         run_cmd('curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc 2>/dev/null', "Adding PostgreSQL GPG key...")
         run_cmd('echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list')
@@ -314,16 +554,17 @@ def run_takserver_deploy(config):
         log_step(""); log_step("━━━ Step 3/9: Package Verification ━━━")
         if config.get('gpg_key_path') and config.get('policy_path'):
             log_step("GPG key and policy found — verifying...")
-            run_cmd('apt-get install -y debsig-verify gnupg2 > /dev/null 2>&1', check=False)
+            run_cmd('DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y debsig-verify > /dev/null 2>&1', check=False)
             r = subprocess.run(f"sed -n 's/.*id=\"\\([^\"]*\\)\".*/\\1/p' {config['policy_path']} | head -1", shell=True, capture_output=True, text=True)
             pid = r.stdout.strip()
             log_step(f"  Policy ID: {pid}")
             if pid:
                 run_cmd(f'mkdir -p /usr/share/debsig/keyrings/{pid}')
                 run_cmd(f'mkdir -p /etc/debsig/policies/{pid}')
-                run_cmd(f'gpg2 --no-default-keyring --keyring /usr/share/debsig/keyrings/{pid}/debsig.gpg --import {config["gpg_key_path"]} 2>/dev/null')
+                run_cmd(f'touch /usr/share/debsig/keyrings/{pid}/debsig.gpg')
+                run_cmd(f'gpg --no-default-keyring --keyring /usr/share/debsig/keyrings/{pid}/debsig.gpg --import {config["gpg_key_path"]} 2>/dev/null')
                 run_cmd(f'cp {config["policy_path"]} /etc/debsig/policies/{pid}/debsig.pol')
-                v = subprocess.run(f'debsig-verify {pkg}', shell=True, capture_output=True, text=True)
+                v = subprocess.run(f'debsig-verify -v {pkg}', shell=True, capture_output=True, text=True)
                 if v.returncode == 0: log_step("✓ Package signature VERIFIED")
                 else: log_step(f"⚠ Verification exit code {v.returncode} — installing anyway")
         else:
@@ -332,12 +573,12 @@ def run_takserver_deploy(config):
         log_step(""); log_step("━━━ Step 4/9: Installing TAK Server ━━━")
         log_step(f"Installing {pkg_name}...")
         # Primary: apt-get install handles dependencies automatically
-        r1 = run_cmd(f'DEBIAN_FRONTEND=noninteractive apt-get install -y {pkg} 2>&1', check=False)
+        r1 = run_cmd(f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y {pkg} 2>&1', check=False)
         if not r1:
             # Fallback: dpkg + fix-broken (proven chain from Ubuntu script)
             log_step("  apt-get failed, trying dpkg + dependency fix...")
-            run_cmd(f'dpkg -i {pkg} 2>&1', check=False)
-            run_cmd('apt-get install -f -y 2>&1', "  Resolving dependencies...", check=False)
+            run_cmd(f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l dpkg -i {pkg} 2>&1', check=False)
+            run_cmd('DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -f -y 2>&1', "  Resolving dependencies...", check=False)
         # PostgreSQL cluster check (from proven script - sometimes cluster isn't created)
         pg_check = subprocess.run('pg_lsclusters 2>/dev/null | grep -q "15"', shell=True, capture_output=True)
         if pg_check.returncode != 0:
@@ -353,7 +594,10 @@ def run_takserver_deploy(config):
         run_cmd('systemctl daemon-reload')
         run_cmd('systemctl start takserver', "Starting TAK Server...")
         run_cmd('systemctl enable takserver > /dev/null 2>&1')
-        log_step("Waiting 30 seconds..."); time.sleep(30)
+        log_step("Waiting 30 seconds...")
+        for remaining in range(20, -1, -10):
+            time.sleep(10)
+            deploy_log.append(f"  \u23f3 {remaining//60:02d}:{remaining%60:02d} remaining")
         log_step("✓ TAK Server started")
 
         log_step(""); log_step("━━━ Step 6/9: Configuring Firewall ━━━")
@@ -391,7 +635,10 @@ def run_takserver_deploy(config):
         run_cmd('systemctl stop takserver'); time.sleep(10)
         run_cmd('pkill -9 -f takserver 2>/dev/null; true', check=False); time.sleep(5)
         run_cmd('systemctl start takserver')
-        log_step("Waiting 90 seconds..."); time.sleep(90)
+        log_step("Waiting 1.5 minutes...")
+        for remaining in range(80, -1, -10):
+            time.sleep(10)
+            deploy_log.append(f"  \u23f3 {remaining//60:02d}:{remaining%60:02d} remaining")
 
         log_step(""); log_step("━━━ Step 8/9: Configuring CoreConfig.xml ━━━")
         run_cmd('sed -i \'s|<input auth="anonymous" _name="stdtcp" protocol="tcp" port="8087"/>|<input auth="x509" _name="stdssl" protocol="tls" port="8089"/>|g\' /opt/tak/CoreConfig.xml', "Enabling X.509 auth on 8089...")
@@ -416,7 +663,19 @@ def run_takserver_deploy(config):
         run_cmd('systemctl stop takserver'); time.sleep(10)
         run_cmd('pkill -9 -f takserver 2>/dev/null; true', check=False); time.sleep(5)
         run_cmd('systemctl start takserver')
-        log_step("Waiting 3 minutes for full initialization..."); time.sleep(180)
+        log_step("Waiting 10 minutes for full initialization before promoting admin...")
+        total_wait = 600
+        waited = 0
+        while waited < total_wait:
+            time.sleep(10)
+            waited += 10
+            if deploy_status.get('cancelled'):
+                log_step("\u26a0 Cancelled during initialization wait")
+                return
+            left = total_wait - waited
+            m, s = divmod(left, 60)
+            deploy_log.append(f"  \u23f3 {m:02d}:{s:02d} remaining")
+        log_step("\u2713 Initialization wait complete")
 
         log_step(""); log_step("━━━ Step 9/9: Promoting Admin ━━━")
         run_cmd('java -jar /opt/tak/utils/UserManager.jar certmod -A /opt/tak/certs/files/admin.pem 2>&1', "Promoting admin certificate...", check=False)
@@ -425,7 +684,11 @@ def run_takserver_deploy(config):
             log_step("Creating webadmin user...")
             run_cmd(f"java -jar /opt/tak/utils/UserManager.jar usermod -A -p '{webadmin_pass}' webadmin 2>&1", check=False)
             log_step("✓ webadmin user created")
-        run_cmd('systemctl restart takserver'); time.sleep(30)
+        run_cmd('systemctl restart takserver')
+        log_step("Waiting 30 seconds...")
+        for remaining in range(20, -1, -10):
+            time.sleep(10)
+            deploy_log.append(f"  \u23f3 {remaining//60:02d}:{remaining%60:02d} remaining")
         ip = load_settings().get('server_ip', 'YOUR-IP')
         log_step(""); log_step("=" * 50); log_step("✓ DEPLOYMENT COMPLETE!"); log_step("=" * 50); log_step("")
         log_step(f"  WebGUI (cert):     https://{ip}:8443")
@@ -640,6 +903,7 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="status-banner" id="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🗺️</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
+<div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
 <div class="status-info"><div class="status-icon running">🗺️</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
 <div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
@@ -666,11 +930,19 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <a href="https://{{ settings.get('server_ip', '') }}:8446" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none">🔑 WebGUI :8446 (password)</a>
 </div>
 </div>
+<div class="section-title">Services</div>
+<div id="services-panel" style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div id="services-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading services...</div>
+</div>
 <div class="section-title">Certificates</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:16px">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;·&nbsp; /opt/tak/certs/files/</div>
-<div id="cert-file-list" style="font-family:'JetBrains Mono',monospace;font-size:13px">Loading...</div>
+<div style="display:flex;align-items:center;justify-content:space-between">
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim)">Certificate password: <span style="color:var(--cyan)">atakatak</span> &nbsp;&middot;&nbsp; /opt/tak/certs/files/</div>
+<a href="/certs" class="cert-btn cert-btn-secondary" style="text-decoration:none">📁 Browse Certificates</a>
 </div>
+</div>
+<div class="section-title">Server Log <span style="font-size:11px;color:var(--text-dim);font-weight:400">takserver-messaging.log</span></div>
+<div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
 <div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="document.getElementById('file-input').click()">
@@ -706,39 +978,105 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 </main>
 <footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type', '') }} · {{ settings.get('server_ip', '') }}</footer>
 <script>
-async function loadCertFiles(){
-    const el=document.getElementById('cert-file-list');
+async function loadServices(){
+    var el=document.getElementById('services-list');
     if(!el)return;
     try{
-        const r=await fetch('/api/certs/list');const d=await r.json();
-        if(!d.files||d.files.length===0){el.innerHTML='<span style="color:var(--text-dim)">No certificate files found</span>';return}
-        let h='<table style="width:100%;border-collapse:collapse">';
-        d.files.forEach(f=>{
-            const ext=f.name.split('.').pop().toLowerCase();
-            const icon=ext==='p12'?'🔑':ext==='pem'?'📄':ext==='jks'?'☕':ext==='crt'?'📜':'📁';
-            h+='<tr style="border-bottom:1px solid var(--border)">';
-            h+='<td style="padding:8px 4px">'+icon+'</td>';
-            h+='<td style="padding:8px 4px;color:var(--text-secondary)">'+f.name+'</td>';
-            h+='<td style="padding:8px 4px;color:var(--text-dim);text-align:right">'+f.size_display+'</td>';
-            h+='<td style="padding:8px 4px;text-align:right"><a href="/api/certs/download/'+f.name+'" style="color:var(--accent);text-decoration:none;font-size:12px">⬇</a></td>';
-            h+='</tr>'});
-        h+='</table>';
+        var r=await fetch('/api/takserver/services');
+        var d=await r.json();
+        if(!d.services||d.services.length===0){el.textContent='No services detected';return}
+        var h='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
+        d.services.forEach(function(s){
+            var color=s.status==='running'?'var(--green)':'var(--red)';
+            var dot=s.status==='running'?'●':'○';
+            h+='<div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:14px;display:flex;align-items:center;gap:12px">';
+            h+='<span style="font-size:20px">'+s.icon+'</span>';
+            h+='<div style="flex:1"><div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text-secondary);font-weight:600">'+s.name+'</span>';
+            h+='<span style="color:'+color+';font-size:11px">'+dot+' '+s.status+'</span></div>';
+            if(s.mem_mb||s.cpu){h+='<div style="color:var(--text-dim);font-size:11px;margin-top:4px">';
+            if(s.mem_mb)h+=s.mem_mb;
+            if(s.mem_mb&&s.cpu)h+=' · ';
+            if(s.cpu)h+='CPU '+s.cpu;
+            if(s.pid)h+=' · PID '+s.pid;
+            h+='</div>'}
+            h+='</div></div>';
+        });
+        h+='</div>';
         el.innerHTML=h;
-    }catch(e){el.innerHTML='<span style="color:var(--red)">Failed to load</span>'}
+    }catch(e){el.textContent='Failed to load services'}
 }
-loadCertFiles();
+if(document.getElementById('services-list')){loadServices();setInterval(loadServices,10000)}
 
-{% if deploying or deploy_done or deploy_error %}
-// Reconnect to running deployment log
-pollDeployLog();
-{% endif %}
+var serverLogOffset=0;
+async function pollServerLog(){
+    var el=document.getElementById('server-log');
+    if(!el)return;
+    try{
+        var r=await fetch('/api/takserver/log?offset='+serverLogOffset+'&lines=80');
+        var d=await r.json();
+        if(d.entries&&d.entries.length>0){
+            if(serverLogOffset===0)el.textContent='';
+            d.entries.forEach(function(e){
+                var l=document.createElement('div');
+                if(e.indexOf('ERROR')>=0||e.indexOf('SEVERE')>=0)l.style.color='var(--red)';
+                else if(e.indexOf('WARN')>=0)l.style.color='var(--yellow)';
+                else if(e.indexOf('INFO')>=0)l.style.color='var(--text-secondary)';
+                l.textContent=e;
+                el.appendChild(l);
+            });
+            el.scrollTop=el.scrollHeight;
+        }else if(serverLogOffset===0){
+            el.textContent='No log entries yet. TAK Server may still be starting...';
+        }
+        serverLogOffset=d.offset||serverLogOffset;
+    }catch(e){}
+}
+if(document.getElementById('server-log')){pollServerLog();setInterval(pollServerLog,5000)}
 
 async function takControl(action){
     const btns=document.querySelectorAll('.control-btn');
     btns.forEach(b=>{b.disabled=true;b.style.opacity='0.5'});
-    try{await fetch('/api/takserver/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});window.location.reload()}
+    try{
+        await fetch('/api/takserver/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+        if(action==='start'||action==='restart'){
+            sessionStorage.setItem('tak_just_started','1');
+        }
+        window.location.reload();
+    }
     catch(e){alert('Failed: '+e.message);btns.forEach(b=>{b.disabled=false;b.style.opacity='1'})}
 }
+
+(function(){
+    if(sessionStorage.getItem('tak_just_started')==='1'){
+        sessionStorage.removeItem('tak_just_started');
+        var notice=document.createElement('div');
+        notice.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:20px;text-align:center;font-family:JetBrains Mono,monospace;font-size:13px;color:#06b6d4;transition:opacity 1s';
+        notice.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before WebGUI login will work.';
+        var main=document.querySelector('main');
+        var banner=document.getElementById('status-banner');
+        if(banner&&banner.nextSibling)main.insertBefore(notice,banner.nextSibling);
+        else if(main)main.appendChild(notice);
+        setTimeout(function(){notice.style.opacity='0';setTimeout(function(){notice.remove()},1000)},30000);
+    }
+})();
+
+(function(){
+    if(document.getElementById('upload-area')){
+        fetch('/api/upload/takserver/existing').then(r=>r.json()).then(d=>{
+            if(d.package||d.gpg_key||d.policy){
+                if(d.package)uploadedFiles.package=d.package;
+                if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;
+                if(d.policy)uploadedFiles.policy=d.policy;
+                var pa=document.getElementById('progress-area');
+                if(d.package){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.package.filename+' ('+d.package.size_mb+' MB)</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
+                if(d.gpg_key){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.gpg_key.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
+                if(d.policy){pa.insertAdjacentHTML('beforeend','<div class="progress-item"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)">'+d.policy.filename+'</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--green)">\u2713 uploaded</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" style="width:100%;background:var(--green)"></div></div></div>')}
+                var a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';var ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
+                updateUploadSummary();
+            }
+        }).catch(function(){});
+    }
+})();
 
 async function takUninstall(){
     if(!confirm('Remove TAK Server completely? This will delete /opt/tak, all certificates, and all config. You can redeploy after.'))return;
@@ -749,6 +1087,12 @@ async function takUninstall(){
     try{const r=await fetch('/api/takserver/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});const d=await r.json();if(d.success){alert('TAK Server removed. Page will reload.');window.location.href='/takserver'}else{alert('Error: '+(d.error||'Unknown'))}}
     catch(e){alert('Failed: '+e.message)}
     btns.forEach(b=>{b.disabled=false;b.style.opacity='1'});
+}
+
+async function cancelDeploy(){
+    if(!confirm('Cancel the deployment? You can redeploy after.'))return;
+    try{const r=await fetch('/api/deploy/cancel',{method:'POST',headers:{'Content-Type':'application/json'}});const d=await r.json();if(d.success){window.location.href='/takserver'}else{alert('Error: '+(d.error||'Unknown'))}}
+    catch(e){alert('Failed: '+e.message)}
 }
 
 let uploadedFiles={package:null,gpg_key:null,policy:null};
@@ -762,27 +1106,63 @@ function handleAddMore(e){queueFiles(e.target.files);e.target.value=''}
 
 function formatSize(b){if(b<1024)return b+' B';if(b<1024*1024)return(b/1024).toFixed(1)+' KB';if(b<1024*1024*1024)return(b/(1024*1024)).toFixed(1)+' MB';return(b/(1024*1024*1024)).toFixed(2)+' GB'}
 
+async function removeFile(fn,elId){
+    try{await fetch('/api/upload/takserver/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:fn})})}catch(e){}
+    var el=document.getElementById(elId);if(el)el.remove();
+    if(uploadedFiles.package&&uploadedFiles.package.filename===fn)uploadedFiles.package=null;
+    if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===fn)uploadedFiles.gpg_key=null;
+    if(uploadedFiles.policy&&uploadedFiles.policy.filename===fn)uploadedFiles.policy=null;
+    updateUploadSummary();
+}
+
 function queueFiles(fl){
     const a=document.getElementById('upload-area');if(a){a.style.maxHeight='120px';a.style.padding='20px';const ic=a.querySelector('.upload-icon');if(ic)ic.style.display='none'}
-    for(const f of fl)uploadFile(f);
+    for(const f of fl){
+        var isDupe=false;
+        if(uploadedFiles.package&&uploadedFiles.package.filename===f.name)isDupe=true;
+        if(uploadedFiles.gpg_key&&uploadedFiles.gpg_key.filename===f.name)isDupe=true;
+        if(uploadedFiles.policy&&uploadedFiles.policy.filename===f.name)isDupe=true;
+        if(isDupe){var pa=document.getElementById('progress-area');pa.insertAdjacentHTML('beforeend','<div class="progress-item" style="opacity:0.6"><span style="font-family:JetBrains Mono,monospace;font-size:13px;color:var(--yellow)">⚠ '+f.name+' already uploaded — skipped</span></div>');continue}
+        uploadFile(f);
+    }
 }
 
 function uploadFile(file){
     uploadsInProgress++;
     const pa=document.getElementById('progress-area');
     const id='u-'+Date.now()+'-'+Math.random().toString(36).substr(2,5);
-    pa.insertAdjacentHTML('beforeend',`<div class="progress-item" id="${id}"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary)">${file.name} <span style="color:var(--text-dim)">(${formatSize(file.size)})</span></span><span id="${id}-pct" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan)">0%</span></div><div class="progress-bar-outer"><div class="progress-bar-inner" id="${id}-bar" style="width:0%"></div></div></div>`);
+    var row=document.createElement('div');row.className='progress-item';row.id=id;
+    var top=document.createElement('div');top.style.cssText='display:flex;justify-content:space-between;align-items:center';
+    var lbl=document.createElement('span');lbl.style.cssText='font-family:JetBrains Mono,monospace;font-size:13px;color:var(--text-secondary)';lbl.textContent=file.name+' ('+formatSize(file.size)+')';
+    var right=document.createElement('span');right.style.cssText='display:flex;align-items:center;gap:8px';
+    var pct=document.createElement('span');pct.id=id+'-pct';pct.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan)';pct.textContent='0%';
+    var cancelBtn=document.createElement('span');cancelBtn.id=id+'-cancel';cancelBtn.textContent='\u2717';cancelBtn.style.cssText='color:var(--red);cursor:pointer;font-size:14px';cancelBtn.title='Cancel upload';
+    right.appendChild(pct);right.appendChild(cancelBtn);top.appendChild(lbl);top.appendChild(right);
+    var barOuter=document.createElement('div');barOuter.className='progress-bar-outer';
+    var barInner=document.createElement('div');barInner.className='progress-bar-inner';barInner.id=id+'-bar';barInner.style.width='0%';
+    barOuter.appendChild(barInner);row.appendChild(top);row.appendChild(barOuter);pa.appendChild(row);
     const fd=new FormData();fd.append('files',file);
     const xhr=new XMLHttpRequest();
+    window['xhr_'+id]=xhr;
+    cancelBtn.onclick=function(){cancelUpload(id)};
     xhr.upload.onprogress=(e)=>{if(e.lengthComputable){const p=Math.round((e.loaded/e.total)*100);document.getElementById(id+'-bar').style.width=p+'%';document.getElementById(id+'-pct').textContent=p+'%'}};
     xhr.onload=()=>{
-        const bar=document.getElementById(id+'-bar');const pct=document.getElementById(id+'-pct');bar.style.width='100%';
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pct.textContent='✓';pct.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy}
-        else{bar.style.background='var(--red)';pct.textContent='✗';pct.style.color='var(--red)'}
+        delete window['xhr_'+id];
+        const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
+        var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
+        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn)}
+        else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
         uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
     };
-    xhr.onerror=()=>{document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='✗';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
+    xhr.onerror=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
+    xhr.onabort=()=>{delete window['xhr_'+id];uploadsInProgress--};
     xhr.open('POST','/api/upload/takserver');xhr.send(fd);
+}
+
+function cancelUpload(id){
+    var xhr=window['xhr_'+id];
+    if(xhr){xhr.abort();delete window['xhr_'+id]}
+    var el=document.getElementById(id);if(el)el.remove();
 }
 
 function updateUploadSummary(){
@@ -871,18 +1251,22 @@ async function startDeploy(){
     catch(e){document.getElementById('deploy-log').textContent='✗ '+e.message}
 }
 
-let logIndex=0,pollFails=0;
+let logIndex=0,pollFails=0,logCleared=false;
 function pollDeployLog(){
     const el=document.getElementById('deploy-log');
     const poll=async()=>{
         try{const r=await fetch('/api/deploy/log?after='+logIndex);const d=await r.json();pollFails=0;
-            if(d.entries.length>0){d.entries.forEach(e=>{const isTimer=e.includes('\u23f3')&&/\\d{2}:\\d{2}\s*$/.test(e.trim());if(isTimer){const prev=el.querySelector('[data-timer]');if(prev){prev.textContent=e;logIndex=d.total;return}};const l=document.createElement('div');if(isTimer)l.setAttribute('data-timer','1');if(e.includes('\u2713'))l.style.color='var(--green)';else if(e.includes('\u2717')||e.includes('FATAL'))l.style.color='var(--red)';else if(e.includes('\u2501\u2501\u2501'))l.style.color='var(--cyan)';else if(e.includes('\u26a0'))l.style.color='var(--yellow)';else if(e.includes('===')||e.includes('WebGUI')||e.includes('Username'))l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
+            if(!logCleared&&d.entries.length>0){el.textContent='';logCleared=true}
+            if(d.entries.length>0){d.entries.forEach(e=>{var isTimer=e.trim().charAt(0)=='\u23f3'&&e.indexOf(':')>0;if(isTimer){var prev=el.querySelector('[data-timer]');if(prev){prev.textContent=e;logIndex=d.total;return}};if(!isTimer){var old=el.querySelector('[data-timer]');if(old)old.removeAttribute('data-timer')};var l=document.createElement('div');if(isTimer)l.setAttribute('data-timer','1');if(e.indexOf('\u2713')>=0)l.style.color='var(--green)';else if(e.indexOf('\u2717')>=0||e.indexOf('FATAL')>=0)l.style.color='var(--red)';else if(e.indexOf('\u2501\u2501\u2501')>=0)l.style.color='var(--cyan)';else if(e.indexOf('\u26a0')>=0)l.style.color='var(--yellow)';else if(e.indexOf('===')>=0||e.indexOf('WebGUI')>=0||e.indexOf('Username')>=0)l.style.color='var(--green)';l.textContent=e;el.appendChild(l)});logIndex=d.total;el.scrollTop=el.scrollHeight}
             if(d.running)setTimeout(poll,1000);
-            else if(d.complete){const b=document.getElementById('deploy-btn');b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1';const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';var wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';var wt=document.createElement('div');wt.style.cssText='font-family:JetBrains Mono,monospace;font-size:14px;color:#06b6d4;margin-bottom:12px';wt.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.';var wb=document.createElement('button');wb.textContent='Refresh Page';wb.style.cssText='padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer';wb.onclick=function(){window.location.href='/takserver'};wa.appendChild(wt);wa.appendChild(wb);document.getElementById('deploy-log-area').after(wa)}
-            else if(d.error){const b=document.getElementById('deploy-btn');b.textContent='✗ Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}
+            else if(d.complete){const b=document.getElementById('deploy-btn');if(b){b.textContent='\u2713 Deployment Complete';b.style.background='var(--green)';b.style.opacity='1'};const dl=document.getElementById('cert-download-area');if(dl)dl.style.display='block';var wa=document.createElement('div');wa.style.cssText='background:rgba(59,130,246,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center';var wt=document.createElement('div');wt.style.cssText='font-family:JetBrains Mono,monospace;font-size:14px;color:#06b6d4;margin-bottom:12px';wt.textContent='\u23f3 TAK Server needs ~5 minutes to fully initialize before login will work.';var wb=document.createElement('button');wb.textContent='Refresh Page';wb.style.cssText='padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer';wb.onclick=function(){window.location.href='/takserver'};wa.appendChild(wt);wa.appendChild(wb);document.getElementById('deploy-log-area').after(wa)}
+            else if(d.error){const b=document.getElementById('deploy-btn');if(b){b.textContent='\u2717 Deployment Failed';b.style.background='var(--red)';b.style.opacity='1'}}
         }catch(e){pollFails++;if(pollFails<30)setTimeout(poll,2000)}
     };poll();
 }
+{% if deploying or deploy_done or deploy_error %}
+pollDeployLog();
+{% endif %}
 </script></body></html>'''
 
 # === Main Entry Point ===
