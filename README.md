@@ -22,6 +22,7 @@ No more SSH. No more editing XML by hand. No more running scripts and hoping.
 ```bash
 git clone https://github.com/takwerx/takwerx-console.git
 cd takwerx-console
+chmod +x start.sh
 sudo ./start.sh
 ```
 
