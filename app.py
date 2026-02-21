@@ -1242,11 +1242,11 @@ def run_takportal_deploy():
                             headers=_ak_headers, method='POST')
                         _urlreq.urlopen(req, timeout=10)
                         plog(f"  \u2713 Application 'TAK Portal' created")
-                    except urllib.error.HTTPError as e:
-                        if e.code == 400:
+                    except Exception as e:
+                        if hasattr(e, 'code') and e.code == 400:
                             plog(f"  \u2713 Application 'TAK Portal' already exists")
                         else:
-                            plog(f"  \u26a0 Application error: {e.code}")
+                            plog(f"  \u26a0 Application error: {str(e)[:80]}")
 
                     # Add to embedded outpost
                     try:
