@@ -1260,7 +1260,6 @@ def run_takportal_deploy():
         plog("")
         plog("  Waiting 2 minutes for Authentik to fully sync...")
         for i in range(24):
-            import time
             time.sleep(5)
             remaining = 120 - (i + 1) * 5
             if remaining % 30 == 0:
@@ -1269,16 +1268,7 @@ def run_takportal_deploy():
         takportal_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
         plog(f"\u2717 FATAL ERROR: {str(e)}")
-        plog(f"  Use the Remove button to reset, then try deploying again.")
         takportal_deploy_status.update({'running': False, 'error': True})
-        # Remove from installed modules so console doesn't show it as running
-        settings = load_settings()
-        modules = settings.get('modules', {})
-        if 'takportal' in modules:
-            modules['takportal']['installed'] = False
-            modules['takportal']['running'] = False
-            settings['modules'] = modules
-            save_settings(settings)
 
 @app.route('/certs')
 @login_required
