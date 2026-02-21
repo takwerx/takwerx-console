@@ -956,6 +956,29 @@ def run_takportal_deploy():
         # Step 4: Build and start
         plog("")
         plog("\u2501\u2501\u2501 Step 4/6: Building & Starting Docker Container \u2501\u2501\u2501")
+        # Patch docker-compose.yml with healthcheck if not already present
+        compose_path = os.path.join(portal_dir, 'docker-compose.yml')
+        if os.path.exists(compose_path):
+            with open(compose_path, 'r') as f:
+                compose_content = f.read()
+            if 'healthcheck' not in compose_content:
+                # Insert healthcheck after 'restart: unless-stopped' inside the service block
+                healthcheck = (
+                    "    healthcheck:\n"
+                    "      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:3000\"]\n"
+                    "      interval: 30s\n"
+                    "      timeout: 10s\n"
+                    "      retries: 3\n"
+                    "      start_period: 15s\n"
+                )
+                compose_content = compose_content.replace(
+                    'restart: unless-stopped',
+                    'restart: unless-stopped\n' + healthcheck.rstrip('\n')
+                )
+                with open(compose_path, 'w') as f:
+                    f.write(compose_content)
+                plog("  ✓ Healthcheck added to docker-compose.yml")
+
         plog("  Building image (this may take a minute)...")
         r = subprocess.run(f'cd {portal_dir} && docker compose up -d --build 2>&1', shell=True, capture_output=True, text=True, timeout=900)
         for line in r.stdout.strip().split('\n'):
@@ -1555,6 +1578,10 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .deploy-btn:hover{transform:translateY(-1px);box-shadow:0 4px 24px rgba(59,130,246,0.25)}
 .deploy-log{background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;margin-top:16px}
 .footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:8px}
+.svc-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px}
+.svc-name{color:var(--text-secondary);font-weight:600;margin-bottom:4px}
+.svc-status{font-size:11px}
 </style></head><body>
 <div class="top-bar"></div>
 <header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">TAK Portal</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
@@ -1593,6 +1620,16 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Admin user: <span style="color:var(--cyan)">akadmin</span> · <button type="button" onclick="showAkPassword()" id="ak-pw-btn" style="background:none;border:1px solid var(--border);color:var(--cyan);padding:2px 10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">🔑 Show Password</button> <span id="ak-pw-display" style="color:var(--green);user-select:all;display:none"></span></div>
+</div>
+<div class="section-title">Configuration</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;line-height:2">
+<div><span style="color:var(--text-dim)">TAK Server:</span> <span style="color:var(--cyan)">{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip','') + ':8443' }}</span></div>
+<div><span style="color:var(--text-dim)">Authentik URL:</span> <span style="color:var(--cyan)">{{ 'https://authentik.' + settings.get('fqdn') if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':9090' }}</span></div>
+<div><span style="color:var(--text-dim)">Forward Auth:</span> <span style="color:var(--green)">{{ 'Enabled via Caddy' if settings.get('fqdn') else 'Disabled (no FQDN)' }}</span></div>
+<div><span style="color:var(--text-dim)">Self-Service Enrollment:</span> <span style="color:var(--cyan)">{{ 'https://takportal.' + settings.get('fqdn') + '/request-access' if settings.get('fqdn') else 'http://' + settings.get('server_ip','') + ':3000/request-access' }}</span></div>
+<div style="margin-top:8px;font-size:11px;color:var(--text-dim)">Users created in TAK Portal flow through Authentik → LDAP → TAK Server automatically</div>
+</div>
 </div>
 {% if container_info.get('containers') %}
 <div class="section-title">Services</div>
