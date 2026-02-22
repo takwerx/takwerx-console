@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TAKWERX Console v0.1.5 - Emergency Services Infrastructure Management Platform"""
+"""TAKWERX TAK-infra v0.1.6 - Emergency Services Infrastructure Management Platform"""
 
 from flask import (Flask, render_template_string, request, jsonify,
     redirect, url_for, session, send_from_directory)
@@ -15,8 +15,8 @@ app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, '.config')
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
-VERSION = "0.1.5"
-GITHUB_REPO = "takwerx/takwerx-console"
+VERSION = "0.1.6"
+GITHUB_REPO = "takwerx/tak-infra"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
 update_cache = {'latest': None, 'checked': 0, 'notes': ''}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -203,7 +203,7 @@ def update_check():
 @app.route('/api/update/apply', methods=['POST'])
 @login_required
 def update_apply():
-    console_dir = os.path.expanduser('~/takwerx-console')
+    console_dir = BASE_DIR
     try:
         r = subprocess.run(f'cd {console_dir} && git pull --rebase --autostash 2>&1', shell=True, capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
