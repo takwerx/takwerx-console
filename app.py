@@ -6878,6 +6878,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
 </div>
 <div class="section-title">Console</div>
+<div class="meta-line">v{{ version }} · {{ settings.get('os_name', 'Unknown OS') }} · {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div>
 <div class="modules-grid">
 {% if not modules %}
 <div style="grid-column:1/-1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:48px;text-align:center">
