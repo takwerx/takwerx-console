@@ -12,6 +12,11 @@ A unified web console for deploying and managing TAK ecosystem infrastructure:
 - **Authentik** — Identity provider with automated LDAP configuration for TAK Server auth
 - **TAK Portal** — User and certificate management portal with auto-configured Authentik + TAK Server integration
 - **Caddy SSL** — Let's Encrypt certificates and reverse proxy management
+- **CloudTAK** — Browser-based TAK client
+- **MediaMTX** — Video streaming server for real-time feeds
+- **Node-RED** — Flow-based automation engine, protected behind Authentik forward auth
+- **Email Relay** — Outbound email for notifications and alerts
+- **Guard Dog** — Network monitoring and intrusion detection *(in development)*
 
 No more SSH. No more editing XML by hand. No more running scripts and hoping.
 
@@ -47,9 +52,11 @@ Deploy services in this order — each step auto-configures the next:
          ↓
 4. TAK Portal        User/cert management portal
                      Auto-configures Authentik URL, API token, TAK Server certs
+         ↓
+5. Anything else     CloudTAK, Node-RED, MediaMTX, Email Relay — any order
 ```
 
-**TAK Server must be deployed before Authentik.** Authentik auto-configures LDAP auth in CoreConfig.xml and restarts TAK Server. TAK Portal auto-detects the Authentik bootstrap token and TAK Server certificates — zero manual configuration required.
+**TAK Server must be deployed before Authentik.** Authentik auto-configures LDAP auth in CoreConfig.xml and restarts TAK Server. TAK Portal auto-detects the Authentik bootstrap token and TAK Server certificates — zero manual configuration required. After TAK Portal, the remaining services can be deployed in any order from the Marketplace.
 
 ## What Gets Automated
 
