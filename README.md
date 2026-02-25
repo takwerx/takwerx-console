@@ -115,6 +115,22 @@ start.sh                    ← One CLI command to launch everything
 
 ## Changelog
 
+### v0.1.7-alpha — 2026-02-24
+
+**Node-RED Authentik Integration**
+Node-RED is now protected behind Authentik forward auth at `console.{fqdn}/nodered/`. Requires Authentik login — same flow as TAK Portal.
+
+**Bug Fix: Node-RED proxy provider was never created**
+The provider creation payload used `authentication_flow` instead of `authorization_flow` (typo). Every POST returned 400 validation error, not "duplicate" — so the provider was never created. Also added the missing `invalidation_flow` field.
+
+**Bug Fix: Orphaned Node-RED application**
+Previous failed deploys created the application with no provider linked. The deploy now PATCHes the existing application to link the provider if it already exists.
+
+**Bug Fix: Update mechanism didn't restart the service**
+Clicking "Update Now" ran `git pull` but never restarted `takwerx-console`. Users saw "Updated!" but the old code kept running. The update now triggers a delayed `systemctl restart` after responding.
+
+---
+
 ### v0.1.6 — 2026-02-22
 
 **Rebranding:** Project renamed from `takwerx-console` to `tak-infra`. The console interface is now a component within the broader TAK-infra platform.

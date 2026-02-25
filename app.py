@@ -1,23 +1,68 @@
 #!/usr/bin/env python3
-"""TAKWERX TAK-infra v0.1.6 - Emergency Services Infrastructure Management Platform"""
+"""infra-TAK v0.1.6 - TAK Infrastructure Platform"""
 
 from flask import (Flask, render_template_string, request, jsonify,
-    redirect, url_for, session, send_from_directory)
+    redirect, url_for, session, send_from_directory, make_response)
 from werkzeug.security import check_password_hash
 from functools import wraps
-import os, ssl, json, secrets, subprocess, time, psutil, threading
+import os, ssl, json, secrets, subprocess, time, psutil, threading, html
 from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
+# Share session across infratak.* and console.* so /nodered/* forward_auth works
+def _set_session_cookie_domain():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.config', 'settings.json')
+        if os.path.exists(p) and (not app.config.get('SESSION_COOKIE_DOMAIN')):
+            _s = json.load(open(p))
+            if _s.get('fqdn'):
+                app.config['SESSION_COOKIE_DOMAIN'] = '.' + _s['fqdn'].split(':')[0]
+    except Exception:
+        pass
+_set_session_cookie_domain()
+
+@app.context_processor
+def inject_cloudtak_icon():
+    from flask import request
+    from markupsafe import Markup
+    d = {'cloudtak_icon': CLOUDTAK_ICON, 'mediamtx_logo_url': MEDIAMTX_LOGO_URL, 'nodered_logo_url': NODERED_LOGO_URL, 'authentik_logo_url': AUTHENTIK_LOGO_URL, 'caddy_logo_url': CADDY_LOGO_URL, 'tak_logo_url': TAK_LOGO_URL}
+    if not request.path.startswith('/api') and not request.path.startswith('/cloudtak/page.js'):
+        d['sidebar_html'] = Markup(render_sidebar(detect_modules(), request.path.strip('/') or 'console'))
+    return d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, '.config')
 UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
-VERSION = "0.1.6"
+
+@app.before_request
+def ensure_session_cookie_domain():
+    """Ensure session cookie is set for parent domain so console subdomain receives it (for /nodered/* forward_auth)."""
+    if app.config.get('SESSION_COOKIE_DOMAIN'):
+        return
+    try:
+        s = load_settings()
+        if s.get('fqdn'):
+            app.config['SESSION_COOKIE_DOMAIN'] = '.' + s['fqdn'].split(':')[0]
+    except Exception:
+        pass
+VERSION = "0.1.7-alpha"
 GITHUB_REPO = "takwerx/tak-infra"
 CADDYFILE_PATH = "/etc/caddy/Caddyfile"
+# CloudTAK official icon (SVG data URL)
+CLOUDTAK_ICON = "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMYXllcl8xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHhtbG5zOnhsaW5rPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hsaW5rIiB2aWV3Qm94PSIwIDAgNzQuMyA0Ni42MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOnVybCgjbGluZWFyLWdyYWRpZW50LTIpO30uY2xzLTJ7ZmlsbDp1cmwoI2xpbmVhci1ncmFkaWVudCk7fTwvc3R5bGU+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQiIHgxPSIxNC4zOCIgeTE9IjguOTMiIHgyPSI2Ni45MiIgeTI9IjYxLjQ3IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjZmY5ODIwIi8+PHN0b3Agb2Zmc2V0PSIuNDIiIHN0b3AtY29sb3I9IiNmZmNlMDQiLz48c3RvcCBvZmZzZXQ9Ii40OSIgc3RvcC1jb2xvcj0iZ29sZCIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJsaW5lYXItZ3JhZGllbnQtMiIgeDE9IjU5LjI3IiB5MT0iLS4zOCIgeDI9IjcyLjc0IiB5Mj0iMTIuMDgiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNmZjk4MjAiLz48c3RvcCBvZmZzZXQ9Ii4yOSIgc3RvcC1jb2xvcj0iI2ZmYjYxMCIvPjxzdG9wIG9mZnNldD0iLjU3IiBzdG9wLWNvbG9yPSJnb2xkIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0yIiBkPSJNNzIuMDUsMjMuNTVjLTEuMjYtMS44OC0zLjAxLTMuNDUtNS4yMS00LjY1LTEuODUtMS4wMS0zLjY5LTEuNTktNS4wNi0xLjkxLS40Mi0xLjc0LTEuMjMtNC4yOC0yLjc3LTYuODVDNTYuNDQsNS44OCw1MS4zNy42Nyw0MS43LjA2Yy0uNTktLjA0LTEuMTgtLjA2LTEuNzUtLjA2LTcuODIsMC0xMi4wNCwzLjUyLTE0LjE5LDYuNDctLjkxLDEuMjQtMS41MywyLjQ4LTEuOTUsMy41NS0uODYtLjEzLTEuODYtLjIyLTIuOTMtLjIyLTMuNTYsMC02LjUyLDEuMDgtOC41NCwzLjEzLTEuOTEsMS45Mi0zLjIsNC4yNi0zLjczLDYuNzUtLjA5LjQxLS4xNS44LS4xOSwxLjE2LS45NS40Ny0yLjEyLDEuMTYtMy4yOSwyLjExQzEuNTYsMjUuODMtLjIsMjkuNjcuMDIsMzQuMDZjLjIyLDQuNDEsMi4yNyw3Ljk2LDUuOTQsMTAuMjksMi42LDEuNjUsNS4xLDIuMTksNS4zOCwyLjIzbC4yMi4wM2guMjJzNDguODYsMCw0OC44NiwwaC4xcy4xLDAsLjEsMGMuMzQtLjAyLDMuMzktLjI2LDYuNTQtMi4xMywzLjA0LTEuOCw2LjctNS40NSw2LjkyLTEyLjU2LjEtMy4xOC0uNjYtNS45OS0yLjI0LTguMzZaTTE0LjQzLDE1YzEuNzUtMS43Nyw0LjI0LTIuMjYsNi40NS0yLjI2LDIuNzEsMCw0Ljk5LjczLDQuOTkuNzMsMCwwLDEuMzMtMTAuNTMsMTQuMDctMTAuNTMuNSwwLDEuMDMuMDIsMS41Ny4wNSwxNi4yNCwxLjAzLDE3Ljc0LDE2LjU0LDE3Ljc0LDE2LjU0LDAsMCw0LjY3LjQyLDguMjEsMy4zMS0zLjQ3LDMuMjItNC45NSw1LjE5LTEyLjc3LDUuNzUtOC42NS42MS03LjQ3LDMuOTUtNy40NywzLjk1bC00LjA1LTguOThoNS43OWMuMTQtMi44NS0uODctNS42NS01LjMxLTUuNjVoLTguNDlsLTYuNTYsMTQuNjJzMS45Ni0zLjMxLTYuNjktMy45NWMtNy42OS0uNTUtNy41OC0yLjY5LTEwLjYxLTUuODgtLjA2LS41OC0uMjYtNC4zLDMuMTMtNy43MloiLz48cGF0aCBjbGFzcz0iY2xzLTEiIGQ9Ik02MS43OSwzLjczaDIuNTl2LjY0aC0uOTN2Mi4zOGgtLjc0di0yLjM4aC0uOTN2LS42NFpNNjcuMDUsMy43M2wtLjc3LDIuMDMtLjc3LTIuMDNoLS45M3YzLjAzaC43di0ybC43MywyaC41NGwuNzMtMnYyaC43di0zLjAzaC0uOTNaIi8+PC9zdmc+"
+# MediaMTX official logo (external URL to avoid long inline strings)
+MEDIAMTX_LOGO_URL = "https://raw.githubusercontent.com/bluenviron/mediamtx/main/logo.png"
+# Node-RED official icons (https://nodered.org/about/resources/media/)
+NODERED_LOGO_URL = "https://nodered.org/about/resources/media/node-red-icon.png"       # icon only (e.g. small nav)
+NODERED_LOGO_URL_2 = "https://nodered.org/about/resources/media/node-red-icon-2.png"   # icon + "Node-RED" text (card, sidebar)
+# Authentik official brand icon (external URL)
+AUTHENTIK_LOGO_URL = "https://raw.githubusercontent.com/goauthentik/authentik/main/web/icons/icon_left_brand.png"
+# Caddy official logo for dark backgrounds — white text (Wikimedia Commons)
+CADDY_LOGO_URL = "https://upload.wikimedia.org/wikipedia/commons/5/56/Caddyserver_logo_dark.svg"
+# TAK (Team Awareness Kit) official brand logo from tak.gov
+TAK_LOGO_URL = "https://tak.gov/assets/logos/brand-06b80939.svg"
 update_cache = {'latest': None, 'checked': 0, 'notes': ''}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -36,7 +81,8 @@ def load_auth():
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('authenticated'): return redirect(url_for('login'))
+        if not session.get('authenticated'):
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
 
@@ -52,7 +98,7 @@ def detect_modules():
         caddy_running = r.stdout.strip() == 'active'
     modules['caddy'] = {'name': 'Caddy SSL', 'installed': caddy_installed, 'running': caddy_running,
         'description': "Domain setup, Let's Encrypt SSL & reverse proxy" if not has_fqdn else f"SSL & reverse proxy — {settings.get('fqdn', '')}",
-        'icon': '🔒', 'route': '/caddy', 'priority': 0 if not has_fqdn else 10}
+        'icon': '🔒', 'icon_url': CADDY_LOGO_URL, 'route': '/caddy', 'priority': 0 if not has_fqdn else 10}
     # TAK Server
     tak_installed = os.path.exists('/opt/tak') and os.path.exists('/opt/tak/CoreConfig.xml')
     tak_running = False
@@ -60,7 +106,7 @@ def detect_modules():
         r = subprocess.run(['systemctl', 'is-active', 'takserver'], capture_output=True, text=True)
         tak_running = r.stdout.strip() == 'active'
     modules['takserver'] = {'name': 'TAK Server', 'installed': tak_installed, 'running': tak_running,
-        'description': 'Team Awareness Kit server for situational awareness', 'icon': '🗺️', 'route': '/takserver', 'priority': 1}
+        'description': 'Team Awareness Kit server for situational awareness', 'icon': '🗺️', 'icon_url': TAK_LOGO_URL, 'route': '/takserver', 'priority': 1}
     # Authentik - Identity Provider
     ak_installed = os.path.exists(os.path.expanduser('~/authentik/docker-compose.yml'))
     ak_running = False
@@ -68,7 +114,7 @@ def detect_modules():
         r = subprocess.run('docker ps --filter name=authentik-server --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
         ak_running = 'Up' in r.stdout
     modules['authentik'] = {'name': 'Authentik', 'installed': ak_installed, 'running': ak_running,
-        'description': 'Identity provider — SSO, LDAP, user management', 'icon': '🔐', 'route': '/authentik', 'priority': 2}
+        'description': 'Identity provider — SSO, LDAP, user management', 'icon': '🔐', 'icon_url': AUTHENTIK_LOGO_URL, 'route': '/authentik', 'priority': 2}
     # TAK Portal - Docker-based user management
     portal_installed = os.path.exists(os.path.expanduser('~/TAK-Portal/docker-compose.yml'))
     portal_running = False
@@ -84,7 +130,7 @@ def detect_modules():
         r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
         mtx_running = r.stdout.strip() == 'active'
     modules['mediamtx'] = {'name': 'MediaMTX', 'installed': mtx_installed, 'running': mtx_running,
-        'description': 'Drone video streaming server (RTSP/SRT/HLS)', 'icon': '📹', 'route': '/mediamtx', 'priority': 4}
+        'description': 'Video Streaming Server', 'icon': '📹', 'icon_url': MEDIAMTX_LOGO_URL, 'route': '/mediamtx', 'priority': 4}
     # Guard Dog
     gd_installed = os.path.exists('/opt/tak-guarddog')
     gd_running = False
@@ -93,31 +139,35 @@ def detect_modules():
         gd_running = 'tak8089guard' in r.stdout
     modules['guarddog'] = {'name': 'Guard Dog', 'installed': gd_installed, 'running': gd_running,
         'description': 'Health monitoring and auto-recovery', 'icon': '🐕', 'route': '/guarddog', 'priority': 5}
-    # Node-RED
+    # Node-RED (container name is "nodered" from compose container_name)
     nodered_installed = False
     nodered_running = False
-    r = subprocess.run('docker ps --filter name=nodered --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
-    if 'Up' in r.stdout:
+    nr_dir = os.path.expanduser('~/node-red')
+    nr_compose = os.path.join(nr_dir, 'docker-compose.yml')
+    if os.path.exists(nr_compose):
         nodered_installed = True
-        nodered_running = True
-    else:
+        r = subprocess.run(f'docker compose -f "{nr_compose}" ps -q 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5, cwd=nr_dir)
+        if r.returncode == 0 and (r.stdout or '').strip():
+            r2 = subprocess.run('docker ps --filter name=nodered --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+            nodered_running = bool(r2.stdout and 'Up' in r2.stdout)
+    if not nodered_installed and (os.path.exists(os.path.expanduser('~/node-red')) or os.path.exists('/opt/nodered')):
+        nodered_installed = True
         r = subprocess.run(['systemctl', 'is-active', 'nodered'], capture_output=True, text=True)
         if r.stdout.strip() == 'active':
-            nodered_installed = True
             nodered_running = True
-        elif os.path.exists(os.path.expanduser('~/node-red')) or os.path.exists('/opt/nodered'):
-            nodered_installed = True
     modules['nodered'] = {'name': 'Node-RED', 'installed': nodered_installed, 'running': nodered_running,
-        'description': 'Flow-based automation & integrations', 'icon': '🔴', 'route': '/nodered', 'priority': 6}
+        'description': 'Flow-based automation & integrations', 'icon': '🔴', 'icon_url': NODERED_LOGO_URL_2, 'route': '/nodered', 'priority': 6}
     # CloudTAK
     cloudtak_dir = os.path.expanduser('~/CloudTAK')
     cloudtak_installed = os.path.exists(cloudtak_dir) and os.path.exists(os.path.join(cloudtak_dir, 'docker-compose.yml'))
     cloudtak_running = False
-    if cloudtak_installed:
-        r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
-        cloudtak_running = 'Up' in r.stdout
+    r = subprocess.run('docker ps --filter name=cloudtak-api --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.stdout and 'Up' in r.stdout:
+        cloudtak_running = True
+    if not cloudtak_installed and cloudtak_running:
+        cloudtak_installed = True  # container up but dir missing (e.g. different user) — show as installed so card is accurate
     modules['cloudtak'] = {'name': 'CloudTAK', 'installed': cloudtak_installed, 'running': cloudtak_running,
-        'description': 'Web-based TAK client — browser access to TAK', 'icon': '☁️', 'route': '/cloudtak', 'priority': 7}
+        'description': 'Web-based TAK client — browser access to TAK', 'icon': '☁️', 'icon_data': CLOUDTAK_ICON, 'route': '/cloudtak', 'priority': 7}
     # Email Relay (Postfix)
     email_installed = subprocess.run(['which', 'postfix'], capture_output=True).returncode == 0
     email_running = False
@@ -127,6 +177,45 @@ def detect_modules():
     modules['emailrelay'] = {'name': 'Email Relay', 'installed': email_installed, 'running': email_running,
         'description': 'Postfix relay — notifications for TAK Portal & MediaMTX', 'icon': '📧', 'route': '/emailrelay', 'priority': 8}
     return dict(sorted(modules.items(), key=lambda x: x[1].get('priority', 99)))
+
+def render_sidebar(modules, active_path):
+    """Build sidebar nav HTML: Console and Marketplace always; tool links only when installed.
+    active_path is the current path (e.g. 'console', 'nodered') for highlighting."""
+    active = (active_path or '').strip('/') or 'console'
+    def link(href, content, title=None):
+        path = href.strip('/')
+        cls = 'nav-item active' if path == active else 'nav-item'
+        t = f' title="{html.escape(title)}"' if title else ''
+        return f'<a href="{href}" class="{cls}"{t}>{content}</a>'
+    logo = '<div class="sidebar-logo"><span>infra-TAK</span><small>TAK Infrastructure Platform</small><small style="display:block;margin-top:2px;font-size:9px;color:var(--text-dim);opacity:0.85">built by TAKWERX</small></div>'
+    parts = [logo]
+    parts.append(link('/console', '<span class="nav-icon material-symbols-outlined">dashboard</span>Console'))
+    caddy = modules.get('caddy', {})
+    if caddy.get('installed'):
+        parts.append(link('/caddy', f'<img src="{html.escape(CADDY_LOGO_URL)}" alt="Caddy SSL" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block">', 'Caddy SSL'))
+    tak = modules.get('takserver', {})
+    if tak.get('installed'):
+        parts.append(link('/takserver', f'<img src="{html.escape(TAK_LOGO_URL)}" alt="TAK Server" class="nav-icon" style="height:24px;width:auto;max-width:48px;object-fit:contain;display:block"><span>TAK Server</span>', 'TAK Server'))
+    ak = modules.get('authentik', {})
+    if ak.get('installed'):
+        parts.append(link('/authentik', f'<img src="{html.escape(AUTHENTIK_LOGO_URL)}" alt="Authentik" class="nav-icon" style="height:48px;width:auto;max-width:100px;object-fit:contain;display:block">', 'Authentik'))
+    portal = modules.get('takportal', {})
+    if portal.get('installed'):
+        parts.append(link('/takportal', '<span class="nav-icon material-symbols-outlined">group</span>TAK Portal'))
+    cloudtak = modules.get('cloudtak', {})
+    if cloudtak.get('installed'):
+        parts.append(link('/cloudtak', f'<img src="{html.escape(CLOUDTAK_ICON)}" alt="" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block"><span>CloudTAK</span>'))
+    mtx = modules.get('mediamtx', {})
+    if mtx.get('installed'):
+        parts.append(link('/mediamtx', f'<img src="{html.escape(MEDIAMTX_LOGO_URL)}" alt="MediaMTX" class="nav-icon" style="height:48px;width:auto;max-width:100px;object-fit:contain;display:block">', 'MediaMTX'))
+    nr = modules.get('nodered', {})
+    if nr.get('installed'):
+        parts.append(link('/nodered', f'<img src="{html.escape(NODERED_LOGO_URL)}" alt="" class="nav-icon" style="height:24px;width:auto;max-width:72px;object-fit:contain;display:block"><span>Node-RED</span>'))
+    email = modules.get('emailrelay', {})
+    if email.get('installed'):
+        parts.append(link('/emailrelay', '<span class="nav-icon material-symbols-outlined">outgoing_mail</span>Email Relay'))
+    parts.append(link('/marketplace', '<span class="nav-icon material-symbols-outlined">shopping_cart</span>Marketplace'))
+    return '<nav class="sidebar">\n  ' + '\n  '.join(parts) + '\n</nav>'
 
 def get_system_metrics():
     cpu = psutil.cpu_percent(interval=0.5)
@@ -148,20 +237,68 @@ def login():
         auth = load_auth()
         if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
             session['authenticated'] = True
-            return redirect(url_for('dashboard'))
+            return redirect(url_for('console_page'))
         return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
     return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for('index'))
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    """Landing: login at / (infratak.fqdn); when logged in redirect to console."""
+    if request.method == 'POST':
+        auth = load_auth()
+        if auth.get('password_hash') and check_password_hash(auth['password_hash'], request.form.get('password', '')):
+            session['authenticated'] = True
+            return redirect(url_for('console_page'))
+        return render_template_string(LOGIN_TEMPLATE, error='Invalid password', version=VERSION)
+    if not session.get('authenticated'):
+        return render_template_string(LOGIN_TEMPLATE, error=None, version=VERSION)
+    return redirect(url_for('console_page'))
+
+@app.route('/api/forward-auth')
+def forward_auth():
+    """Caddy forward_auth: return 200 if session is authenticated; else redirect to console login. Used for /nodered/*."""
+    if session.get('authenticated'):
+        return '', 200
+    # Redirect to console login so user can log in and retry (Caddy passes this response to the client)
+    settings = load_settings()
+    fqdn = (settings.get('fqdn') or '').split(':')[0]
+    if fqdn:
+        login_url = f"https://console.{fqdn}/login"
+        return redirect(login_url, code=302)
+    return '', 401
+
+@app.route('/console')
 @login_required
-def dashboard():
-    return render_template_string(DASHBOARD_TEMPLATE,
-        settings=load_settings(), modules=detect_modules(), metrics=get_system_metrics(), version=VERSION)
+def console_page():
+    """Console: only installed/deployed services."""
+    settings = load_settings()
+    all_modules = detect_modules()
+    modules = {k: m for k, m in all_modules.items() if m.get('installed')}
+    resp = render_template_string(CONSOLE_TEMPLATE,
+        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION)
+    from flask import make_response
+    r = make_response(resp)
+    r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return r
+
+@app.route('/marketplace')
+@login_required
+def marketplace_page():
+    """Marketplace: only services that are not yet installed (deploy from here)."""
+    settings = load_settings()
+    all_modules = detect_modules()
+    modules = {k: m for k, m in all_modules.items() if not m.get('installed')}
+    resp = render_template_string(MARKETPLACE_TEMPLATE,
+        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION)
+    from flask import make_response
+    r = make_response(resp)
+    r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return r
 
 @app.route('/api/update/check')
 @login_required
@@ -175,7 +312,7 @@ def update_check():
     try:
         req = urllib.request.Request(
             f'https://api.github.com/repos/{GITHUB_REPO}/tags',
-            headers={'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'TAKWERX-Console'}
+            headers={'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'infra-TAK'}
         )
         resp = urllib.request.urlopen(req, timeout=5)
         data = json.loads(resp.read().decode())
@@ -213,8 +350,9 @@ def update_apply():
         r = subprocess.run(f'cd {console_dir} && git pull --rebase --autostash 2>&1', shell=True, capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
             return jsonify({'success': False, 'error': r.stderr.strip() or r.stdout.strip()})
-        # Clear update cache
         update_cache.update({'latest': None, 'checked': 0})
+        subprocess.Popen('sleep 2 && systemctl restart takwerx-console', shell=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return jsonify({'success': True, 'output': r.stdout.strip(), 'restart_required': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -248,23 +386,86 @@ def mediamtx_page():
 @app.route('/guarddog')
 @login_required
 def guarddog_page():
-    return redirect(url_for('dashboard'))
+    return redirect(url_for('marketplace_page'))
 
 @app.route('/nodered')
 @login_required
 def nodered_page():
-    return redirect(url_for('dashboard'))
+    settings = load_settings()
+    modules = detect_modules()
+    nr = modules.get('nodered', {})
+    ak = modules.get('authentik', {})
+    resp = make_response(render_template_string(NODERED_TEMPLATE,
+        settings=settings, nr=nr, version=VERSION,
+        authentik_installed=ak.get('installed'),
+        deploying=nodered_deploy_status.get('running', False),
+        deploy_done=nodered_deploy_status.get('complete', False),
+        caddy_logo_url=CADDY_LOGO_URL, tak_logo_url=TAK_LOGO_URL, authentik_logo_url=AUTHENTIK_LOGO_URL,
+        cloudtak_icon=CLOUDTAK_ICON, mediamtx_logo_url=MEDIAMTX_LOGO_URL))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return resp
 
 @app.route('/cloudtak')
 @login_required
 def cloudtak_page():
     settings = load_settings()
     cloudtak = detect_modules().get('cloudtak', {})
+    container_info = {}
+    if cloudtak.get('running'):
+        r = subprocess.run('docker ps --filter "name=cloudtak" --format "{{.Names}}|||{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+        containers = []
+        for line in (r.stdout or '').strip().split('\n'):
+            if line.strip():
+                parts = line.split('|||')
+                containers.append({'name': parts[0], 'status': parts[1] if len(parts) > 1 else ''})
+        container_info['containers'] = containers
     return render_template_string(CLOUDTAK_TEMPLATE,
         settings=settings, cloudtak=cloudtak,
         version=VERSION,
+        cloudtak_icon=CLOUDTAK_ICON,
+        container_info=container_info,
         deploying=cloudtak_deploy_status.get('running', False),
         deploy_done=cloudtak_deploy_status.get('complete', False))
+
+@app.route('/cloudtak/page.js')
+@login_required
+def cloudtak_page_js():
+    return app.response_class(CLOUDTAK_PAGE_JS, mimetype='application/javascript')
+
+def _caddy_configured_urls(settings, modules):
+    """Build list of configured subdomain → service for the Caddy page. Only when FQDN is set."""
+    fqdn = settings.get('fqdn', '').strip()
+    if not fqdn:
+        return []
+    base = f'https://{fqdn}'
+    urls = []
+    # infra-TAK platform (login) and console (dashboard) — both served when Caddy has a domain
+    urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': 'Login & platform'})
+    urls.append({'name': 'Console', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}', 'desc': 'Console (after login)'})
+    tak = modules.get('takserver', {})
+    if tak.get('installed'):
+        urls.append({'name': 'TAK Server', 'host': f'tak.{fqdn}', 'url': f'https://tak.{fqdn}', 'desc': 'WebGUI, Marti API'})
+    ak = modules.get('authentik', {})
+    if ak.get('installed'):
+        urls.append({'name': 'Authentik', 'host': f'authentik.{fqdn}', 'url': f'https://authentik.{fqdn}', 'desc': 'Identity provider'})
+    portal = modules.get('takportal', {})
+    if portal.get('installed'):
+        urls.append({'name': 'TAK Portal', 'host': f'takportal.{fqdn}', 'url': f'https://takportal.{fqdn}', 'desc': 'User & cert management'})
+    nodered = modules.get('nodered', {})
+    if nodered.get('installed'):
+        urls.append({'name': 'Node-RED', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}/nodered/', 'desc': 'Flow editor (console only)'})
+    cloudtak = modules.get('cloudtak', {})
+    if cloudtak.get('installed'):
+        urls.append({'name': 'CloudTAK (map)', 'host': f'map.{fqdn}', 'url': f'https://map.{fqdn}', 'desc': 'Browser TAK client'})
+        urls.append({'name': 'CloudTAK (tiles)', 'host': f'tiles.map.{fqdn}', 'url': f'https://tiles.map.{fqdn}', 'desc': 'Tile server'})
+        urls.append({'name': 'CloudTAK (video)', 'host': f'video.{fqdn}', 'url': f'https://video.{fqdn}', 'desc': 'Map video / HLS'})
+    mtx = modules.get('mediamtx', {})
+    if mtx.get('installed'):
+        mtx_host = settings.get('mediamtx_domain', f'stream.{fqdn}')
+        if '.' not in mtx_host:
+            mtx_host = f'{mtx_host}.{fqdn}'
+        urls.append({'name': 'MediaMTX', 'host': mtx_host, 'url': f'https://{mtx_host}', 'desc': 'Stream web console & HLS'})
+    return urls
 
 @app.route('/caddy')
 @login_required
@@ -283,8 +484,10 @@ def caddy_page():
                 caddyfile_content = f.read()
         except Exception:
             pass
+    configured_urls = _caddy_configured_urls(settings, modules)
     return render_template_string(CADDY_TEMPLATE,
         settings=settings, caddy=caddy, caddyfile=caddyfile_content,
+        configured_urls=configured_urls,
         version=VERSION, deploying=caddy_deploy_status.get('running', False),
         deploy_done=caddy_deploy_status.get('complete', False))
 
@@ -328,11 +531,16 @@ def caddy_update_domain():
     settings = load_settings()
     settings['fqdn'] = domain
     save_settings(settings)
-    # Regenerate Caddyfile
     generate_caddyfile(settings)
-    # Reload Caddy
-    r = subprocess.run('systemctl reload caddy 2>&1', shell=True, capture_output=True, text=True)
-    return jsonify({'success': True, 'domain': domain})
+    # Restart in background so response reaches client before Caddy restarts (console is behind Caddy)
+    def _restart():
+        time.sleep(2)
+        try:
+            subprocess.run('systemctl restart caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        except Exception:
+            pass
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({'success': True, 'domain': domain, 'output': 'Caddy restart scheduled.'})
 
 @app.route('/api/caddy/caddyfile')
 @login_required
@@ -342,22 +550,37 @@ def caddy_get_caddyfile():
             return jsonify({'success': True, 'content': f.read()})
     return jsonify({'success': False, 'content': ''})
 
+def _caddy_restart_after_response():
+    """Run in background: write Caddyfile and restart Caddy after a short delay so the HTTP response can be sent first (console is often behind Caddy)."""
+    time.sleep(2)
+    try:
+        generate_caddyfile(load_settings())
+        subprocess.run('systemctl restart caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+    except Exception:
+        pass
+
 @app.route('/api/caddy/control', methods=['POST'])
 @login_required
 def caddy_control():
     data = request.get_json()
     action = data.get('action', '')
     if action == 'restart':
-        r = subprocess.run('systemctl restart caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        generate_caddyfile(load_settings())
+        threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
+        return jsonify({'success': True, 'output': 'Caddy restart scheduled; connection may drop briefly.'})
     elif action == 'stop':
         r = subprocess.run('systemctl stop caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        return jsonify({'success': r.returncode == 0, 'output': (r.stdout or r.stderr or '').strip()})
     elif action == 'start':
-        r = subprocess.run('systemctl start caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        generate_caddyfile(load_settings())
+        threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
+        return jsonify({'success': True, 'output': 'Caddy start scheduled; connection may drop briefly.'})
     elif action == 'reload':
-        r = subprocess.run('systemctl reload caddy 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+        generate_caddyfile(load_settings())
+        threading.Thread(target=_caddy_restart_after_response, daemon=True).start()
+        return jsonify({'success': True, 'output': 'Caddy restart scheduled; connection may drop briefly.'})
     else:
         return jsonify({'success': False, 'error': 'Unknown action'})
-    return jsonify({'success': r.returncode == 0, 'output': r.stdout.strip()})
 
 @app.route('/api/caddy/uninstall', methods=['POST'])
 @login_required
@@ -390,16 +613,63 @@ def generate_caddyfile(settings=None):
         return
     modules = detect_modules()
 
-    lines = [f"# TAKWERX Console - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
+    lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
 
-    # Console — console.domain
-    lines.append(f"console.{domain} {{")
+    # infra-TAK (login & platform) — infratak.domain
+    lines.append(f"infratak.{domain} {{")
     lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
     lines.append(f"        transport http {{")
     lines.append(f"            tls")
     lines.append(f"            tls_insecure_skip_verify")
     lines.append(f"        }}")
     lines.append(f"    }}")
+    lines.append(f"}}")
+    lines.append("")
+
+    # Console — console.domain; /nodered/* → Node-RED (behind Authentik when Authentik is installed)
+    nodered = modules.get('nodered', {})
+    ak = modules.get('authentik', {})
+    lines.append(f"console.{domain} {{")
+    if nodered.get('installed'):
+        if ak.get('installed'):
+            # Authentik outpost must be reachable for auth to work on this host
+            lines.append(f"    route {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        handle /nodered/* {{")
+            lines.append(f"            forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"                uri /outpost.goauthentik.io/auth/caddy")
+            lines.append(f"                trusted_proxies private_ranges")
+            lines.append(f"            }}")
+            lines.append(f"            reverse_proxy 127.0.0.1:1880")
+            lines.append(f"        }}")
+            lines.append(f"        handle {{")
+            lines.append(f"            reverse_proxy 127.0.0.1:5001 {{")
+            lines.append(f"                transport http {{")
+            lines.append(f"                    tls")
+            lines.append(f"                    tls_insecure_skip_verify")
+            lines.append(f"                }}")
+            lines.append(f"            }}")
+            lines.append(f"        }}")
+            lines.append(f"    }}")
+        else:
+            lines.append(f"    handle /nodered/* {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:1880")
+            lines.append(f"    }}")
+            lines.append(f"    handle {{")
+            lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
+            lines.append(f"            transport http {{")
+            lines.append(f"                tls")
+            lines.append(f"                tls_insecure_skip_verify")
+            lines.append(f"            }}")
+            lines.append(f"        }}")
+            lines.append(f"    }}")
+    else:
+        lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
+        lines.append(f"        transport http {{")
+        lines.append(f"            tls")
+        lines.append(f"            tls_insecure_skip_verify")
+        lines.append(f"        }}")
+        lines.append(f"    }}")
     lines.append(f"}}")
     lines.append("")
 
@@ -458,14 +728,7 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # Node-RED — nodered.domain
-    nodered = modules.get('nodered', {})
-    if nodered.get('installed'):
-        lines.append(f"# Node-RED")
-        lines.append(f"nodered.{domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:1880")
-        lines.append(f"}}")
-        lines.append("")
+    # Node-RED: no subdomain — only via console.{domain}/nodered/ (session required)
 
     # CloudTAK — map.domain, tiles.map.domain, video.domain
     cloudtak = modules.get('cloudtak', {})
@@ -475,22 +738,31 @@ def generate_caddyfile(settings=None):
         lines.append(f"    reverse_proxy 127.0.0.1:5000")
         lines.append(f"}}")
         lines.append("")
-        lines.append(f"# CloudTAK Tile Server")
+        lines.append(f"# CloudTAK Tile Server (CORS for map origin)")
         lines.append(f"tiles.map.{domain} {{")
+        lines.append(f"    header Access-Control-Allow-Origin *")
         lines.append(f"    reverse_proxy 127.0.0.1:5002")
         lines.append(f"}}")
         lines.append("")
-        lines.append(f"# CloudTAK Media (video)")
+        # CloudTAK Media: one host on 443. /stream/* → HLS (18888), rest → MediaMTX API (9997).
+        # CORS inside handle blocks so HLS manifest/segments from map.domain get Allow-Origin (avoids status 0).
+        lines.append(f"# CloudTAK Media (video) — /stream/* → HLS, rest → MediaMTX API")
         lines.append(f"video.{domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:18888")
+        lines.append(f"    handle /stream/* {{")
+        lines.append(f"        header Access-Control-Allow-Origin *")
+        lines.append(f"        reverse_proxy 127.0.0.1:18888")
+        lines.append(f"    }}")
+        lines.append(f"    handle {{")
+        lines.append(f"        header Access-Control-Allow-Origin *")
+        lines.append(f"        reverse_proxy 127.0.0.1:9997")
+        lines.append(f"    }}")
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — stream.domain (when CloudTAK installed) or video.domain (standalone)
+    # MediaMTX — stream.domain is web editor only. For drone/controller/ATAK push to 8554/8890.
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
-        cloudtak_installed = modules.get('cloudtak', {}).get('installed')
-        mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}' if cloudtak_installed else f'video.{domain}')
+        mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
         lines.append(f"# MediaMTX Web Console")
         lines.append(f"{mtx_domain} {{")
         lines.append(f"    reverse_proxy 127.0.0.1:5080")
@@ -1632,7 +1904,13 @@ WantedBy=multi-user.target
             subprocess.run(
                 f"sed -i 's/app.run(host=.0.0.0.0., port=5000/app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5080))/' {webeditor_dir}/mediamtx_config_editor.py",
                 shell=True)
-            plog(f"✓ Web editor installed from {webeditor_src} (port 5080)")
+            # Console-deployed MediaMTX uses API port 9898 (CloudTAK uses 9997). Patch editor so "active streams" works.
+            subprocess.run(f"sed -i 's/9997/9898/g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+            # When CloudTAK is installed, MediaMTX is at stream.* so "Stream URLs" in the editor should show stream. not video.
+            if domain:
+                subprocess.run(f"sed -i 's/video\\./stream./g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+                plog("  Stream URL host set to stream.*")
+            plog(f"✓ Web editor installed from {webeditor_src} (port 5080, API 9898)")
         else:
             plog("⚠ mediamtx_config_editor.py not found alongside app.py")
             plog("  Place it next to app.py and redeploy, or install manually")
@@ -1660,6 +1938,7 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
 WorkingDirectory=/opt/mediamtx-webeditor
 Environment=PORT=5080
+Environment=MEDIAMTX_API_URL=http://127.0.0.1:9898
 Restart=always
 RestartSec=5
 User=root
@@ -1681,9 +1960,9 @@ WantedBy=multi-user.target
         # Step 6: Firewall
         plog("")
         plog("━━━ Step 6/7: Configuring Firewall ━━━")
-        for port_proto in ['8554/tcp', '8322/tcp', '8888/tcp', '8890/udp', '8000/udp', '8001/udp', '5080/tcp']:
+        for port_proto in ['8554/tcp', '8322/tcp', '8888/tcp', '8890/udp', '8000/udp', '8001/udp', '5080/tcp', '9898/tcp']:
             subprocess.run(f'ufw allow {port_proto} 2>/dev/null; true', shell=True, capture_output=True)
-        plog("✓ Ports opened: 8554 (RTSP), 8322 (RTSPS), 8888 (HLS), 8890 (SRT), 5080 (Web Editor)")
+        plog("✓ Ports opened: 8554 (RTSP), 8322 (RTSPS), 8888 (HLS), 8890 (SRT), 5080 (Web Editor), 9898 (API)")
 
         # Step 7: Caddy integration
         plog("")
@@ -1693,11 +1972,11 @@ WantedBy=multi-user.target
             # Update Caddyfile first so Caddy issues the cert
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
-            plog(f"✓ Caddyfile updated — video.{domain}")
+            mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
+            plog(f"✓ Caddyfile updated — {mtx_domain}")
 
             # Wait up to 60s for cert
             cert_base = '/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory'
-            mtx_domain = settings.get('mediamtx_domain', f'video.{domain}')
             cert_file = f'{cert_base}/{mtx_domain}/{mtx_domain}.crt'
             key_file  = f'{cert_base}/{mtx_domain}/{mtx_domain}.key'
             plog(f"  Waiting for Caddy to issue cert for {mtx_domain}...")
@@ -1742,8 +2021,7 @@ WantedBy=multi-user.target
             plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             plog(f"🎉 MediaMTX v{version} deployed successfully!")
             if domain:
-                cloudtak_installed = detect_modules().get('cloudtak', {}).get('installed', False)
-                mtx_display_domain = f"stream.{domain}" if cloudtak_installed else f"video.{domain}"
+                mtx_display_domain = f"stream.{domain}"
                 plog(f"   Web Console: https://{mtx_display_domain}")
                 plog(f"   HLS streams: https://{mtx_display_domain}/[stream]/index.m3u8")
             else:
@@ -1764,6 +2042,7 @@ WantedBy=multi-user.target
 # ── CloudTAK ──────────────────────────────────────────────────────────────────
 cloudtak_deploy_log = []
 cloudtak_deploy_status = {'running': False, 'complete': False, 'error': False}
+cloudtak_uninstall_status = {'running': False, 'done': False, 'error': None}
 
 @app.route('/api/cloudtak/deploy', methods=['POST'])
 @login_required
@@ -1782,6 +2061,19 @@ def cloudtak_deploy_log_api():
     return jsonify({'entries': cloudtak_deploy_log[idx:], 'total': len(cloudtak_deploy_log),
         'running': cloudtak_deploy_status['running'], 'complete': cloudtak_deploy_status['complete'],
         'error': cloudtak_deploy_status['error']})
+
+@app.route('/api/cloudtak/redeploy', methods=['POST'])
+@login_required
+def cloudtak_redeploy_api():
+    """Update .env and override, restart containers, re-apply nginx patch. Use when CloudTAK is already installed."""
+    if cloudtak_deploy_status.get('running'):
+        return jsonify({'error': 'Another operation is in progress'}), 409
+    cloudtak_deploy_log.clear()
+    cloudtak_deploy_status.update({'running': True, 'complete': False, 'error': False})
+    # First line so pollers see activity immediately
+    cloudtak_deploy_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Update config & restart started")
+    threading.Thread(target=run_cloudtak_redeploy, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Update config & restart started'})
 
 @app.route('/api/cloudtak/control', methods=['POST'])
 @login_required
@@ -1806,8 +2098,19 @@ def cloudtak_control():
 @app.route('/api/cloudtak/logs')
 @login_required
 def cloudtak_container_logs():
-    lines = request.args.get('lines', 50, type=int)
-    r = subprocess.run('docker logs cloudtak-api-1 --tail {} 2>&1'.format(lines), shell=True, capture_output=True, text=True, timeout=10)
+    lines = request.args.get('lines', 80, type=int)
+    container = request.args.get('container', '').strip()
+    cloudtak_dir = os.path.expanduser('~/CloudTAK')
+    compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+    if not os.path.exists(compose_yml):
+        compose_yml = os.path.join(cloudtak_dir, 'compose.yaml')
+    if container:
+        r = subprocess.run(f'docker logs {container} --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15)
+    else:
+        if os.path.exists(compose_yml):
+            r = subprocess.run(f'docker compose -f "{compose_yml}" logs --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15, cwd=cloudtak_dir)
+        else:
+            r = subprocess.run(f'docker logs cloudtak-api-1 --tail {lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15)
     entries = [l for l in (r.stdout.strip().split('\n') if r.stdout.strip() else []) if l.strip()]
     return jsonify({'entries': entries})
 
@@ -1819,15 +2122,42 @@ def cloudtak_uninstall():
     auth = load_auth()
     if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
         return jsonify({'error': 'Invalid admin password'}), 403
-    cloudtak_dir = os.path.expanduser('~/CloudTAK')
-    subprocess.run(f'cd {cloudtak_dir} && docker compose down -v --rmi local 2>/dev/null; true', shell=True, capture_output=True, timeout=120)
-    if os.path.exists(cloudtak_dir):
-        subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True)
-    cloudtak_deploy_log.clear()
-    cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
-    generate_caddyfile()
-    subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
-    return jsonify({'success': True, 'steps': ['Stopped and removed Docker containers/volumes', 'Removed ~/CloudTAK', 'Updated Caddyfile']})
+    if cloudtak_uninstall_status.get('running'):
+        return jsonify({'error': 'Uninstall already in progress'}), 409
+    cloudtak_uninstall_status.update({'running': True, 'done': False, 'error': None})
+    def do_uninstall():
+        try:
+            cloudtak_dir = os.path.expanduser('~/CloudTAK')
+            compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+            compose_yaml = os.path.join(cloudtak_dir, 'compose.yaml')
+            if os.path.exists(cloudtak_dir):
+                yml = compose_yml if os.path.exists(compose_yml) else (compose_yaml if os.path.exists(compose_yaml) else None)
+                if yml:
+                    subprocess.run(
+                        f'docker compose -f "{yml}" down -v --rmi local',
+                        shell=True, capture_output=True, timeout=180, cwd=cloudtak_dir
+                    )
+                subprocess.run(f'rm -rf "{cloudtak_dir}"', shell=True, capture_output=True, timeout=60)
+            cloudtak_deploy_log.clear()
+            cloudtak_deploy_status.update({'running': False, 'complete': False, 'error': False})
+            generate_caddyfile()
+            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
+            cloudtak_uninstall_status.update({'running': False, 'done': True, 'error': None})
+        except subprocess.TimeoutExpired:
+            cloudtak_uninstall_status.update({'running': False, 'done': True, 'error': 'Uninstall timed out'})
+        except Exception as e:
+            cloudtak_uninstall_status.update({'running': False, 'done': True, 'error': str(e)})
+    threading.Thread(target=do_uninstall, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Uninstall started'})
+
+@app.route('/api/cloudtak/uninstall/status')
+@login_required
+def cloudtak_uninstall_status_api():
+    return jsonify({
+        'running': cloudtak_uninstall_status.get('running', False),
+        'done': cloudtak_uninstall_status.get('done', False),
+        'error': cloudtak_uninstall_status.get('error')
+    })
 
 def run_cloudtak_deploy():
     def plog(msg):
@@ -1865,12 +2195,32 @@ def run_cloudtak_deploy():
                 plog(f"  ⚠ git pull warning: {r.stderr.strip()[:100]}")
         else:
             plog("  Cloning from GitHub...")
-            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
             if r.returncode != 0:
                 plog(f"✗ Clone failed: {r.stderr.strip()[:200]}")
                 cloudtak_deploy_status.update({'running': False, 'error': True})
                 return
         plog("✓ Repository ready")
+
+        # Ensure compose file exists (fix partial/bad clone)
+        compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+        compose_yaml = os.path.join(cloudtak_dir, 'compose.yaml')
+        if not os.path.exists(compose_yml) and not os.path.exists(compose_yaml):
+            plog("  docker-compose.yml missing — re-cloning...")
+            subprocess.run(f'rm -rf {cloudtak_dir}', shell=True, capture_output=True, timeout=30)
+            r = subprocess.run(f'git clone https://github.com/dfpc-coe/CloudTAK.git {cloudtak_dir}', shell=True, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                plog(f"✗ Re-clone failed: {r.stderr.strip()[:200]}")
+                cloudtak_deploy_status.update({'running': False, 'error': True})
+                return
+            compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+            compose_yaml = os.path.join(cloudtak_dir, 'compose.yaml')
+        if not os.path.exists(compose_yml):
+            compose_yml = compose_yaml if os.path.exists(compose_yaml) else os.path.join(cloudtak_dir, 'docker-compose.yml')
+        if not os.path.exists(compose_yml):
+            plog(f"✗ No compose file found in {cloudtak_dir}")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
 
         # Step 3: Generate .env and docker-compose.override.yml
         plog("")
@@ -1881,24 +2231,22 @@ def run_cloudtak_deploy():
         minio_pass = _secrets.token_hex(16)
 
         # Build URLs
-        # CRITICAL: API_URL must use Docker bridge gateway (172.20.0.1) NOT the public domain.
-        # CloudTAK media container calls back to the API internally. Using the public domain
-        # causes a loopback failure — Docker containers cannot reach their own host via external HTTPS.
-        # 172.20.0.1 is the Docker bridge gateway, always reachable from all containers.
-        docker_gateway = "172.20.0.1"
+        # API_URL is used in two places: (1) TileJSON/tile URLs sent to the browser — must be
+        # reachable by the user's browser (public URL). (2) Media container callback to the API.
+        # We use the public URL when domain is set so the map and basemaps render. The media
+        # container then calls the same URL; on same-host deployments this usually works.
+        # If domain is not set, use Docker gateway so containers can reach the API.
         if domain:
+            api_url = f"https://map.{domain}"
             pmtiles_url = f"https://tiles.map.{domain}"
         else:
+            api_url = f"http://172.20.0.1:5000"
             pmtiles_url = f"http://{settings.get('server_ip', '127.0.0.1')}:5002"
 
-        api_url = f"http://{docker_gateway}:5000"   # Always use internal Docker gateway
-
-        # CRITICAL: CloudTAK media container's video-service.ts HARDCODES port 9997 for ALL
-        # MediaMTX API calls. It takes the hostname from CLOUDTAK_Config_media_url and then
-        # forces port 9997, completely ignoring whatever port is in the URL.
-        # Therefore: CloudTAK media container MUST map to host port 9997.
-        # Standalone MediaMTX API is moved to port 9898 to free up 9997.
-        media_url = "http://localhost:9997"   # port 9997 hardcoded in CloudTAK video-service.ts
+        if domain:
+            media_url = f"https://video.{domain}"
+        else:
+            media_url = "http://media:9997"
 
         env_content = f"""CLOUDTAK_Mode=docker-compose
 CLOUDTAK_Config_media_url={media_url}
@@ -1914,8 +2262,8 @@ MINIO_ROOT_PASSWORD={minio_pass}
 
 POSTGRES=postgres://docker:docker@postgis:5432/gis
 
-# API_URL uses Docker bridge gateway so containers can call back to the API internally.
-# DO NOT use the public domain — Docker containers cannot loopback through external HTTPS.
+# API_URL must be reachable by the browser (for tile URLs in TileJSON). We set it to the public
+# map URL when domain is set so the map and basemaps render.
 API_URL={api_url}
 PMTILES_URL={pmtiles_url}
 
@@ -1932,15 +2280,27 @@ MEDIA_PORT_SRT=18890
         with open(env_path, 'w') as f:
             f.write(env_content)
 
+        # So the API container can reach the host (e.g. TAKWERX Console / Marti at :5001)
+        override_path = os.path.join(cloudtak_dir, 'docker-compose.override.yml')
+        override_yml = """# TAKWERX: API container must reach host (e.g. :5001 for Marti/TAK Server proxy)
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+"""
+        with open(override_path, 'w') as f:
+            f.write(override_yml)
+        plog("  docker-compose.override.yml written (api → host.docker.internal for :5001)")
+
         plog(f"✓ .env written")
-        plog(f"  API URL: {api_url} (Docker bridge gateway — internal)")
+        plog(f"  API URL: {api_url}")
         plog(f"  Media URL: {media_url} (CloudTAK media container — port 9997 hardcoded in source)")
 
-        # Step 4: Build Docker images
+        # Step 4: Build Docker images (use -f so compose file is found regardless of cwd)
         plog("")
         plog("━━━ Step 4/7: Building Docker Images ━━━")
         plog("  This may take 5-10 minutes on first run...")
-        r = subprocess.run(f'cd {cloudtak_dir} && docker compose build 2>&1', shell=True, capture_output=True, text=True, timeout=1800)
+        r = subprocess.run(f'docker compose -f {compose_yml} build 2>&1', shell=True, capture_output=True, text=True, timeout=1800, cwd=cloudtak_dir)
         if r.returncode != 0:
             plog(f"✗ Docker build failed")
             for line in r.stdout.strip().split('\n')[-20:]:
@@ -1956,8 +2316,8 @@ MEDIA_PORT_SRT=18890
         plog("  Starting all containers including media (remapped ports)...")
         plog("  Standalone MediaMTX stays on original ports — no conflict")
         r = subprocess.run(
-            f'cd {cloudtak_dir} && docker compose up -d 2>&1',
-            shell=True, capture_output=True, text=True, timeout=120
+            f'docker compose -f {compose_yml} up -d 2>&1',
+            shell=True, capture_output=True, text=True, timeout=120, cwd=cloudtak_dir
         )
         if r.returncode != 0:
             plog(f"✗ docker compose up failed")
@@ -1967,6 +2327,9 @@ MEDIA_PORT_SRT=18890
             cloudtak_deploy_status.update({'running': False, 'error': True})
             return
         plog("✓ Containers started")
+
+        # CloudTAK nginx proxies /api to 127.0.0.1:5001 (Node app in same container). Do NOT
+        # replace that with host:5001 or /api would hit TAKWERX Console and the app would stay on "Loading CloudTAK".
 
         # Step 6: Wait for API to be ready
         plog("")
@@ -2013,6 +2376,134 @@ MEDIA_PORT_SRT=18890
     except Exception as e:
         plog(f"✗ Unexpected error: {str(e)}")
         cloudtak_deploy_status.update({'running': False, 'error': True})
+
+def run_cloudtak_redeploy():
+    """Rewrite .env and override, restart stack, re-apply nginx patch. Reuses deploy log/status."""
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        cloudtak_deploy_log.append(entry)
+        print(entry, flush=True)
+    try:
+        cloudtak_dir = os.path.expanduser('~/CloudTAK')
+        compose_yml = os.path.join(cloudtak_dir, 'docker-compose.yml')
+        if not os.path.exists(compose_yml):
+            compose_yml = os.path.join(cloudtak_dir, 'compose.yaml')
+        if not os.path.exists(compose_yml):
+            plog("✗ CloudTAK not found (no compose file)")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        settings = load_settings()
+        domain = (settings.get('fqdn') or '').strip() or None
+        if domain:
+            api_url = f"https://map.{domain}"
+            pmtiles_url = f"https://tiles.map.{domain}"
+            media_url = f"https://video.{domain}"
+        else:
+            api_url = f"http://172.20.0.1:5000"
+            pmtiles_url = f"http://{settings.get('server_ip', '127.0.0.1')}:5002"
+            media_url = "http://media:9997"
+        env_path = os.path.join(cloudtak_dir, '.env')
+        signing_secret = None
+        minio_pass = None
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('SigningSecret='):
+                        signing_secret = line.split('=', 1)[1].strip()
+                    elif line.startswith('MINIO_ROOT_PASSWORD='):
+                        minio_pass = line.split('=', 1)[1].strip()
+        import secrets as _secrets
+        if not signing_secret:
+            signing_secret = _secrets.token_hex(32)
+        if not minio_pass:
+            minio_pass = _secrets.token_hex(16)
+        env_content = f"""CLOUDTAK_Mode=docker-compose
+CLOUDTAK_Config_media_url={media_url}
+
+SigningSecret={signing_secret}
+
+ASSET_BUCKET=cloudtak
+AWS_S3_Endpoint=http://store:9000
+AWS_S3_AccessKeyId=cloudtakminioadmin
+AWS_S3_SecretAccessKey={minio_pass}
+MINIO_ROOT_USER=cloudtakminioadmin
+MINIO_ROOT_PASSWORD={minio_pass}
+
+POSTGRES=postgres://docker:docker@postgis:5432/gis
+
+API_URL={api_url}
+PMTILES_URL={pmtiles_url}
+
+MEDIA_PORT_API=9997
+MEDIA_PORT_RTSP=18554
+MEDIA_PORT_RTMP=11935
+MEDIA_PORT_HLS=18888
+MEDIA_PORT_SRT=18890
+"""
+        with open(env_path, 'w') as f:
+            f.write(env_content)
+        override_path = os.path.join(cloudtak_dir, 'docker-compose.override.yml')
+        with open(override_path, 'w') as f:
+            f.write("""# TAKWERX: API container must reach host (e.g. :5001 for Marti/TAK Server proxy)
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+""")
+        plog("✓ .env and override written")
+        plog("  Restarting containers...")
+        r = subprocess.run(f'docker compose -f "{compose_yml}" restart 2>&1', shell=True, capture_output=True, text=True, timeout=120, cwd=cloudtak_dir)
+        if r.returncode != 0:
+            # Fallback for systems with docker-compose (hyphen) instead of docker compose
+            r = subprocess.run(f'docker-compose -f "{compose_yml}" restart 2>&1', shell=True, capture_output=True, text=True, timeout=120, cwd=cloudtak_dir)
+        if r.returncode != 0:
+            plog(f"✗ Restart failed: {r.stderr or r.stdout or 'unknown'}")
+            cloudtak_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Containers restarted")
+        time.sleep(3)
+        # Restore /api proxy to 127.0.0.1:5001 (Node in container) if a previous patch sent it to the host
+        api_container = None
+        for _ in range(15):
+            r = subprocess.run(f'docker compose -f "{compose_yml}" ps -q api 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5, cwd=cloudtak_dir)
+            cid = (r.stdout or '').strip()
+            if cid and len(cid) >= 8:
+                api_container = cid
+                break
+            time.sleep(1)
+        if api_container:
+            for nf in ['/etc/nginx/nginx.conf', '/etc/nginx/conf.d/default.conf']:
+                subprocess.run(f'docker exec {api_container} sed -i "s|proxy_pass http://[^;]*:5001|proxy_pass http://127.0.0.1:5001|g" {nf} 2>/dev/null', shell=True, capture_output=True, timeout=5)
+            subprocess.run(f'docker exec {api_container} nginx -s reload 2>/dev/null', shell=True, capture_output=True, timeout=5)
+            plog("  Nginx /api proxy pointed at CloudTAK API (127.0.0.1:5001)")
+        plog("  Waiting for CloudTAK API to respond...")
+        import urllib.request as _urlreq
+        for attempt in range(45):
+            try:
+                _urlreq.urlopen('http://localhost:5000/', timeout=3)
+                plog("✓ CloudTAK API is responding")
+                break
+            except Exception:
+                if attempt % 5 == 0 and attempt > 0:
+                    plog(f"  Still waiting... ({attempt * 2}s)")
+                time.sleep(2)
+        else:
+            plog("⚠ API did not respond in time — if map.<domain> stays on 'Loading CloudTAK', check Container Logs and ensure the api container is running")
+        if domain:
+            generate_caddyfile(settings)
+            try:
+                subprocess.run('systemctl reload caddy 2>/dev/null', shell=True, capture_output=True, timeout=45)
+                plog("✓ Caddy reloaded")
+            except subprocess.TimeoutExpired:
+                plog("⚠ Caddy reload timed out — reload it from the Caddy page if needed")
+        plog("✓ Update config & restart done")
+        cloudtak_deploy_status.update({'running': False, 'complete': True, 'error': False})
+    except Exception as e:
+        plog(f"✗ Error: {str(e)}")
+        cloudtak_deploy_status.update({'running': False, 'error': True})
+    finally:
+        cloudtak_deploy_status['running'] = False
 
 # ── Email Relay ────────────────────────────────────────────────────────────────
 email_deploy_log = []
@@ -2271,14 +2762,430 @@ def emailrelay_uninstall():
     return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
 
 
-MEDIAMTX_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MediaMTX — TAKWERX Console</title>
+# ── Node-RED ──────────────────────────────────────────────────────────────────
+nodered_deploy_log = []
+nodered_deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
+
+@app.route('/api/nodered/deploy', methods=['POST'])
+@login_required
+def nodered_deploy_api():
+    if nodered_deploy_status.get('running'):
+        return jsonify({'error': 'Deployment already in progress'}), 409
+    nodered_deploy_log.clear()
+    nodered_deploy_status.update({'running': True, 'complete': False, 'error': False, 'cancelled': False})
+    threading.Thread(target=run_nodered_deploy, daemon=True).start()
+    return jsonify({'success': True})
+
+@app.route('/api/nodered/deploy/cancel', methods=['POST'])
+@login_required
+def nodered_deploy_cancel():
+    nodered_deploy_status['cancelled'] = True
+    return jsonify({'success': True})
+
+@app.route('/api/nodered/deploy/log')
+@login_required
+def nodered_deploy_log_api():
+    idx = request.args.get('index', 0, type=int)
+    return jsonify({'entries': nodered_deploy_log[idx:], 'total': len(nodered_deploy_log),
+        'running': nodered_deploy_status['running'], 'complete': nodered_deploy_status['complete'],
+        'error': nodered_deploy_status['error'], 'cancelled': nodered_deploy_status.get('cancelled', False)})
+
+@app.route('/api/nodered/control', methods=['POST'])
+@login_required
+def nodered_control():
+    action = (request.json or {}).get('action', '')
+    nr_dir = os.path.expanduser('~/node-red')
+    compose = os.path.join(nr_dir, 'docker-compose.yml')
+    if not os.path.exists(compose):
+        return jsonify({'error': 'Node-RED not deployed here'}), 400
+    if action == 'start':
+        subprocess.run(f'docker compose -f "{compose}" up -d 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+    elif action == 'stop':
+        subprocess.run(f'docker compose -f "{compose}" stop 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+    elif action == 'restart':
+        subprocess.run(f'docker compose -f "{compose}" restart 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+    else:
+        return jsonify({'error': 'Invalid action'}), 400
+    time.sleep(2)
+    r = subprocess.run('docker ps --filter name=nodered --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
+    running = r.stdout and 'Up' in r.stdout
+    return jsonify({'success': True, 'running': running})
+
+@app.route('/api/nodered/logs')
+@login_required
+def nodered_logs():
+    lines = request.args.get('lines', 80, type=int)
+    nr_dir = os.path.expanduser('~/node-red')
+    compose = os.path.join(nr_dir, 'docker-compose.yml')
+    if not os.path.exists(compose):
+        return jsonify({'entries': []})
+    r = subprocess.run(f'docker compose -f "{compose}" logs --tail={lines} 2>&1', shell=True, capture_output=True, text=True, timeout=15, cwd=nr_dir)
+    entries = [l for l in (r.stdout.strip().split('\n') if r.stdout else []) if l.strip()]
+    return jsonify({'entries': entries})
+
+@app.route('/api/nodered/uninstall', methods=['POST'])
+@login_required
+def nodered_uninstall():
+    try:
+        data = request.get_json(silent=True) or {}
+        password = data.get('password', '')
+        auth = load_auth()
+        if not auth.get('password_hash') or not check_password_hash(auth['password_hash'], password):
+            return jsonify({'error': 'Invalid admin password'}), 403
+        nr_dir = os.path.expanduser('~/node-red')
+        compose = os.path.join(nr_dir, 'docker-compose.yml')
+        if os.path.exists(compose):
+            subprocess.run(f'docker compose -f "{compose}" down -v 2>&1', shell=True, capture_output=True, timeout=60, cwd=nr_dir)
+        if os.path.exists(nr_dir):
+            subprocess.run(f'rm -rf "{nr_dir}"', shell=True, capture_output=True, timeout=10)
+        nodered_deploy_log.clear()
+        nodered_deploy_status.update({'running': False, 'complete': False, 'error': False})
+        settings = load_settings()
+        if settings.get('fqdn'):
+            generate_caddyfile(settings)
+            subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True, timeout=15)
+        return jsonify({'success': True, 'steps': ['Node-RED container and data removed', 'Caddyfile updated']})
+    except Exception as e:
+        return jsonify({'error': f'Uninstall failed: {str(e)}'}), 500
+
+def _ensure_authentik_nodered_app(fqdn, ak_token, plog=None):
+    """Create Node-RED proxy provider + application in Authentik, add to embedded outpost.
+    Mirrors TAK Portal's working code exactly (lines 1442-1571)."""
+    if not fqdn or not ak_token:
+        return False
+    def log(msg):
+        if plog:
+            plog(msg)
+    import urllib.request as _urlreq
+    import urllib.error
+    _ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    _ak_url = 'http://127.0.0.1:9090'
+
+    try:
+        # 1) Get authorization flow
+        flow_pk = None
+        attempt = 0
+        while attempt < 60:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=authorization&ordering=slug', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                flows = json.loads(resp.read().decode())['results']
+                for fl in flows:
+                    if 'implicit' in fl.get('slug', ''):
+                        flow_pk = fl['pk']
+                        break
+                if not flow_pk and flows:
+                    flow_pk = flows[0]['pk']
+                if flow_pk:
+                    break
+            except Exception:
+                pass
+            if attempt % 6 == 0:
+                log(f"  ⏳ Waiting for authorization flow... ({attempt * 5}s)")
+            time.sleep(5)
+            attempt += 1
+        if not flow_pk:
+            log("  ⚠ No authorization flow found for Node-RED")
+            return False
+        log("  ✓ Got authorization flow")
+
+        # 2) Get invalidation flow
+        inv_flow_pk = None
+        attempt = 0
+        while attempt < 60:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/flows/instances/?designation=invalidation', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                inv_flows = json.loads(resp.read().decode())['results']
+                inv_flow_pk = next((f['pk'] for f in inv_flows if 'provider' not in f['slug']), inv_flows[0]['pk'] if inv_flows else None)
+                if inv_flow_pk:
+                    break
+            except Exception:
+                pass
+            if attempt % 6 == 0:
+                log(f"  ⏳ Waiting for invalidation flow... ({attempt * 5}s)")
+            time.sleep(5)
+            attempt += 1
+        if not inv_flow_pk:
+            log("  ⚠ No invalidation flow found for Node-RED")
+            return False
+        log("  ✓ Got invalidation flow")
+
+        # 3) Create proxy provider (same payload structure as TAK Portal)
+        provider_pk = None
+        if flow_pk and inv_flow_pk:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
+                    data=json.dumps({'name': 'Node-RED Proxy', 'authorization_flow': flow_pk,
+                        'invalidation_flow': inv_flow_pk,
+                        'external_host': f'https://console.{fqdn}/nodered/', 'mode': 'forward_single',
+                        'token_validity': 'hours=24'}).encode(),
+                    headers=_ak_headers, method='POST')
+                resp = _urlreq.urlopen(req, timeout=10)
+                provider_pk = json.loads(resp.read().decode())['pk']
+                log("  ✓ Proxy provider created")
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 400:
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search=Node-RED', headers=_ak_headers)
+                    resp = _urlreq.urlopen(req, timeout=10)
+                    results = json.loads(resp.read().decode())['results']
+                    if results:
+                        provider_pk = results[0]['pk']
+                    log("  ✓ Proxy provider already exists")
+                else:
+                    log(f"  ⚠ Proxy provider error: {str(e)[:100]}")
+
+        # 4) Create application
+        if provider_pk:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                    data=json.dumps({'name': 'Node-RED', 'slug': 'node-red',
+                        'provider': provider_pk}).encode(),
+                    headers=_ak_headers, method='POST')
+                _urlreq.urlopen(req, timeout=10)
+                log("  ✓ Application 'Node-RED' created")
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 400:
+                    try:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/node-red/',
+                            data=json.dumps({'provider': provider_pk}).encode(),
+                            headers=_ak_headers, method='PATCH')
+                        _urlreq.urlopen(req, timeout=10)
+                    except Exception:
+                        pass
+                    log("  ✓ Application 'Node-RED' updated")
+                else:
+                    log(f"  ⚠ Application error: {str(e)[:80]}")
+
+            # 5) Add to embedded outpost
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/?search=embedded', headers=_ak_headers)
+                resp = _urlreq.urlopen(req, timeout=10)
+                outposts = json.loads(resp.read().decode())['results']
+                embedded = next((o for o in outposts if 'embed' in o.get('name','').lower() or o.get('type') == 'proxy'), None)
+                if embedded:
+                    current_providers = embedded.get('providers', [])
+                    if provider_pk not in current_providers:
+                        current_providers.append(provider_pk)
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/outposts/instances/{embedded["pk"]}/',
+                        data=json.dumps({'providers': current_providers}).encode(),
+                        headers=_ak_headers, method='PATCH')
+                    _urlreq.urlopen(req, timeout=10)
+                    log("  ✓ Node-RED added to embedded outpost")
+                else:
+                    log("  ⚠ No embedded outpost found")
+            except Exception as e:
+                log(f"  ⚠ Outpost error: {str(e)[:80]}")
+        else:
+            log("  ⚠ Could not create or find Node-RED proxy provider")
+    except Exception as e:
+        log(f"  ⚠ Forward auth setup error: {str(e)[:100]}")
+    return True
+
+def run_nodered_deploy():
+    def plog(msg):
+        entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        nodered_deploy_log.append(entry)
+        print(entry, flush=True)
+    try:
+        if nodered_deploy_status.get('cancelled'):
+            nodered_deploy_status.update({'running': False, 'complete': False, 'cancelled': True})
+            return
+        settings = load_settings()
+        domain = (settings.get('fqdn') or '').strip()
+        nr_dir = os.path.expanduser('~/node-red')
+        os.makedirs(nr_dir, exist_ok=True)
+        plog("━━━ Step 1/3: Creating Docker Compose ━━━")
+        compose_yml = os.path.join(nr_dir, 'docker-compose.yml')
+        settings_js = os.path.join(nr_dir, 'settings.js')
+        # Node-RED under /nodered so Caddy can proxy console.domain/nodered/* without stripping path
+        with open(settings_js, 'w') as f:
+            f.write("""module.exports = {
+  flowFile: 'flows.json',
+  flowFilePretty: true,
+  userDir: '/data',
+  httpAdminRoot: '/nodered',
+  httpNodeRoot: '/nodered'
+};
+""")
+        with open(compose_yml, 'w') as f:
+            f.write("""services:
+  node-red:
+    image: nodered/node-red:latest
+    container_name: nodered
+    ports:
+      - "1880:1880"
+    volumes:
+      - node_red_data:/data
+      - ./settings.js:/data/settings.js
+volumes:
+  node_red_data:
+""")
+        plog("✓ docker-compose.yml written")
+        plog("")
+        plog("━━━ Step 2/3: Starting Node-RED ━━━")
+        r = subprocess.run(f'docker compose -f "{compose_yml}" up -d 2>&1', shell=True, capture_output=True, text=True, timeout=120, cwd=nr_dir)
+        if r.returncode != 0:
+            plog(f"✗ docker compose up failed: {r.stderr or r.stdout or 'unknown'}")
+            nodered_deploy_status.update({'running': False, 'error': True})
+            return
+        plog("✓ Node-RED container started")
+        plog("")
+        plog("━━━ Step 3/3: Updating Caddy ━━━")
+        if domain:
+            generate_caddyfile(settings)
+            subprocess.run('systemctl reload caddy 2>/dev/null', shell=True, capture_output=True, timeout=15)
+            plog(f"✓ Caddy updated — open via https://console.{domain}/nodered/")
+        else:
+            plog("  No domain configured — access via http://<server>:1880")
+        if not nodered_deploy_status.get('cancelled') and domain and os.path.exists(os.path.expanduser('~/authentik/.env')):
+            plog("")
+            plog("━━━ Configuring Authentik for Node-RED ━━━")
+            ak_token = ''
+            with open(os.path.expanduser('~/authentik/.env')) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                        ak_token = line.strip().split('=', 1)[1].strip()
+                        break
+            _ensure_authentik_nodered_app(domain, ak_token, plog)
+            plog("")
+            plog("  Waiting 2 minutes for Authentik outpost to sync...")
+            for i in range(24):
+                if nodered_deploy_status.get('cancelled'):
+                    plog("  ⚠ Cancelled by user")
+                    break
+                time.sleep(5)
+                remaining = 120 - (i + 1) * 5
+                if remaining > 0 and remaining % 30 == 0:
+                    plog(f"  ⏳ {remaining} seconds remaining...")
+            if not nodered_deploy_status.get('cancelled'):
+                plog("  ✓ Sync complete — Node-RED is ready behind Authentik")
+        plog("")
+        if nodered_deploy_status.get('cancelled'):
+            plog("Deployment cancelled.")
+        else:
+            plog("✅ Node-RED deployed. Open the flow editor and build your flows.")
+        nodered_deploy_status.update({'running': False, 'complete': not nodered_deploy_status.get('cancelled', False), 'error': False})
+    except Exception as e:
+        plog(f"✗ Error: {str(e)}")
+        nodered_deploy_status.update({'running': False, 'error': True})
+
+
+NODERED_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Node-RED — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex}
-.sidebar{width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
+.page-header{margin-bottom:28px}.page-header h1{font-size:22px;font-weight:700}.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:20px}
+.card-title{font-size:13px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px}
+.status-banner{display:flex;align-items:center;gap:12px;padding:14px 18px;border-radius:10px;margin-bottom:20px;font-size:13px}
+.status-banner.running{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);color:var(--green)}
+.status-banner.stopped{background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.2);color:var(--yellow)}
+.status-banner.not-installed{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);color:var(--accent)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.info-item{background:#0a0e1a;border-radius:8px;padding:12px 14px}
+.info-label{font-size:11px;color:var(--text-dim);margin-bottom:3px;text-transform:uppercase}
+.info-value{font-size:13px;font-family:'JetBrains Mono',monospace;word-break:break-all}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none}
+.btn-primary{background:var(--accent);color:#fff}.btn-success{background:var(--green);color:#fff}.btn-ghost{background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border)}
+.btn-danger{background:var(--red);color:#fff}
+.controls{display:flex;gap:10px;flex-wrap:wrap}
+.log-box{background:#070a12;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:340px;overflow-y:auto;white-space:pre-wrap}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text-primary);font-size:13px}
+</style></head>
+<body>
+{{ sidebar_html }}
+<div class="main">
+  <div class="page-header"><h1 style="display:flex;flex-direction:column;align-items:flex-start;gap:6px"><img src="{{ nodered_logo_url }}" alt="" style="height:32px;width:auto;object-fit:contain"><span>Node-RED</span></h1><p>Flow-based automation and integrations</p></div>
+  {% if nr.running %}<div class="status-banner running"><div class="dot"></div>Node-RED is running</div>
+  {% elif nr.installed %}<div class="status-banner stopped"><div class="dot"></div>Node-RED is installed but stopped</div>
+  {% else %}<div class="status-banner not-installed"><div class="dot"></div>Node-RED is not installed</div>{% endif %}
+  {% if nr.installed %}
+  {% if authentik_installed and settings.fqdn %}<div class="card" style="border-color:rgba(59,130,246,.3);background:rgba(59,130,246,.05)"><div class="card-title">&#128274; Protected by Authentik</div><p style="font-size:13px;color:var(--text-secondary);line-height:1.5">Node-RED is behind Authentik. The application and proxy provider are created automatically when you deploy Authentik or Node-RED.</p></div>{% endif %}
+  <div class="card"><div class="card-title">Access</div><div class="info-grid">
+    {% if settings.fqdn %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="https://console.{{ settings.fqdn }}/nodered/" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://console.{{ settings.fqdn }}/nodered/</a> &#8599;</div></div>
+    {% else %}<div class="info-item"><div class="info-label">Flow editor</div><div class="info-value"><a href="http://{{ settings.server_ip }}:1880" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">http://{{ settings.server_ip }}:1880</a> &#8599;</div></div>{% endif %}
+    <div class="info-item"><div class="info-label">Install dir</div><div class="info-value">~/node-red</div></div>
+  </div></div>
+  <div class="card"><div class="card-title">Controls</div><div class="controls">
+    <button class="btn {% if nr.running %}btn-ghost{% else %}btn-success{% endif %}" onclick="control('start')">&#x25b6; Start</button>
+    <button class="btn {% if nr.running %}btn-danger{% else %}btn-ghost{% endif %}" onclick="control('stop')">&#x23f9; Stop</button>
+    <button class="btn btn-ghost" onclick="control('restart')">&#x27fa; Restart</button>
+    <button class="btn btn-ghost" onclick="loadLogs()">&#x1f4cb; Logs</button>
+    <button class="btn btn-danger" onclick="document.getElementById('uninstall-modal').classList.add('open')">&#x1f5d1; Uninstall</button>
+  </div><div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div></div>
+  <div class="card" id="logs-card" style="display:none"><div class="card-title">Container logs</div><div class="log-box" id="container-logs">Loading...</div></div>
+  {% else %}
+  <div class="card"><div class="card-title">Deploy Node-RED</div>
+  <p style="font-size:13px;color:var(--text-secondary);margin-bottom:20px">Runs Node-RED in Docker with a persistent volume. With a domain set, the flow editor is at https://nodered.&lt;your-domain&gt;.</p>
+  {% if settings.fqdn %}<p style="font-size:12px;color:var(--text-dim);margin-bottom:16px">Node-RED is only available when logged into the console at <code style="color:var(--cyan)">console.{{ settings.fqdn }}/nodered/</code></p>{% endif %}
+  <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">&#x1f680; Deploy Node-RED</button></div>
+  {% endif %}
+  {% if deploying %}<div class="card" id="deploy-log-card"><div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">Deploy log<button class="btn btn-ghost" id="nodered-cancel-btn-static" onclick="cancelNoderedDeploy()" style="display:none">&#x2717; Cancel</button></div><div class="log-box" id="deploy-log">Initializing...</div></div>{% endif %}
+  <div class="card" id="log-card" style="display:none"><div class="card-title" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">Deploy log<button class="btn btn-ghost" id="nodered-cancel-btn-dyn" onclick="cancelNoderedDeploy()" style="display:none">&#x2717; Cancel</button></div><div class="log-box" id="deploy-log-dyn">Waiting...</div></div>
+</div>
+<div class="modal-overlay" id="uninstall-modal"><div class="modal">
+  <h3>&#x26a0; Uninstall Node-RED?</h3><p>This will stop and remove the container and data volume. Flows will be deleted.</p>
+  <div style="margin-bottom:16px"><label class="form-label">Admin password</label><input class="form-input" id="uninstall-password" type="password" placeholder="Confirm password"></div>
+  <div class="modal-actions"><button class="btn btn-ghost" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button><button class="btn btn-danger" onclick="doUninstall()">Uninstall</button></div>
+  <div id="uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+</div></div>
+<script>
+var logIndex=0,logInterval=null;
+function startDeploy(){var btn=document.getElementById('deploy-btn');btn.disabled=true;document.getElementById('log-card').style.display='block';document.getElementById('deploy-log-dyn').textContent='Starting...';logIndex=0;
+fetch('/api/nodered/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+if(d.error){document.getElementById('deploy-log-dyn').textContent='Error: '+d.error;btn.disabled=false;return;}pollLog();});}
+function pollLog(){function pickLogEl(){var lc=document.getElementById('log-card');return (lc&&lc.style.display!=='none'?document.getElementById('deploy-log-dyn'):null)||document.getElementById('deploy-log')||document.getElementById('deploy-log-dyn');}
+var logEl=pickLogEl();function showCancel(show){var s=document.getElementById('nodered-cancel-btn-static'),d=document.getElementById('nodered-cancel-btn-dyn');if(s)s.style.display=show?'inline-block':'none';if(d)d.style.display=show?'inline-block':'none';}
+function doPoll(){logEl=pickLogEl();fetch('/api/nodered/deploy/log?index='+logIndex,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+if(d.entries&&d.entries.length){if(logIndex===0&&logEl)logEl.textContent='';if(logEl){logEl.textContent+=d.entries.join(String.fromCharCode(10))+String.fromCharCode(10);logEl.scrollTop=logEl.scrollHeight;}logIndex+=d.entries.length;}
+showCancel(d.running);
+if(!d.running){clearInterval(logInterval);var btn=document.getElementById('deploy-btn');if(btn)btn.disabled=false;
+if(d.cancelled){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Cancelled.';}
+else if(d.complete){if(logEl)logEl.textContent+=String.fromCharCode(10,10)+'Deploy complete - page will reload in 15s (or refresh now).';setTimeout(function(){location.reload();},15000);}}});}doPoll();logInterval=setInterval(doPoll,800);}
+function cancelNoderedDeploy(){if(!confirm('Cancel the deployment? You can deploy again after.'))return;fetch('/api/nodered/deploy/cancel',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin'}).then(function(){/* next poll will show cancelled */});}
+if(document.getElementById('deploy-log-card')){logIndex=0;pollLog();}
+function control(action){document.getElementById('control-status').textContent=action+'...';
+fetch('/api/nodered/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){document.getElementById('control-status').textContent=d.running?'Running':'Stopped';setTimeout(function(){window.location.href=window.location.pathname+'?t='+Date.now();},1500);});}
+function loadLogs(){document.getElementById('logs-card').style.display='block';fetch('/api/nodered/logs?lines=80').then(function(r){return r.json();}).then(function(d){document.getElementById('container-logs').textContent=(d.entries||[]).join(String.fromCharCode(10))||'(no output)';});}
+function doUninstall(){var pw=document.getElementById('uninstall-password').value,msg=document.getElementById('uninstall-msg');msg.textContent='';fetch('/api/nodered/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw}),credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){if(d.error){msg.textContent=d.error;return;}msg.textContent='Done. Reloading...';setTimeout(function(){location.reload();},800);}).catch(function(e){msg.textContent=e.message||'Request failed';});}
+</script>
+</body></html>
+'''
+
+
+MEDIAMTX_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MediaMTX — infra-TAK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
+<style>
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
 .sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
 .sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--text-primary)}
 .sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
@@ -2286,7 +3193,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03);border-left-color:var(--border-hover)}
 .nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
 .nav-icon{font-size:15px;width:18px;text-align:center}
-.main{flex:1;overflow-y:auto;padding:32px}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
 .page-header{margin-bottom:28px}
 .page-header h1{font-size:22px;font-weight:700}
 .page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
@@ -2322,23 +3229,16 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .proto-item{background:#0a0e1a;border-radius:8px;padding:10px 12px;text-align:center}
 .proto-name{font-size:11px;font-weight:700;color:var(--cyan);margin-bottom:2px}
 .proto-port{font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace}
+.uninstall-spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes uninstall-spin{to{transform:rotate(360deg)}}
+.uninstall-progress-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text-secondary)}
 </style></head>
 <body>
-<nav class="sidebar">
-  <div class="sidebar-logo"><span>TAKWERX</span><small>Console v{{ version }}</small></div>
-  <a href="/" class="nav-item"><span class="nav-icon">⚡</span>Dashboard</a>
-  <a href="/caddy" class="nav-item"><span class="nav-icon">🔒</span>Caddy SSL</a>
-  <a href="/takserver" class="nav-item"><span class="nav-icon">📡</span>TAK Server</a>
-  <a href="/authentik" class="nav-item"><span class="nav-icon">🔐</span>Authentik</a>
-  <a href="/takportal" class="nav-item"><span class="nav-icon">🌐</span>TAK Portal</a>
-  <a href="/cloudtak" class="nav-item"><span class="nav-icon">☁️</span>CloudTAK</a>
-  <a href="/mediamtx" class="nav-item active"><span class="nav-icon">📹</span>MediaMTX</a>
-  <a href="/emailrelay" class="nav-item"><span class="nav-icon">📧</span>Email Relay</a>
-</nav>
+{{ sidebar_html }}
 <div class="main">
   <div class="page-header">
-    <h1>📹 MediaMTX</h1>
-    <p>Drone video streaming server — RTSP, SRT, and HLS for browser and ATAK playback</p>
+    <h1><img src="{{ mediamtx_logo_url }}" alt="MediaMTX" style="height:28px;vertical-align:middle"></h1>
+    <p>Video Streaming Server</p>
   </div>
 
   {% if mtx.running %}
@@ -2356,27 +3256,10 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     <div class="card-title">Access</div>
     <div class="info-grid">
       {% if settings.fqdn %}
-      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value">https://{% if cloudtak_installed %}stream{% else %}video{% endif %}.{{ settings.fqdn }}</div></div>
-      <div class="info-item"><div class="info-label">HLS Streams</div><div class="info-value">https://{% if cloudtak_installed %}stream{% else %}video{% endif %}.{{ settings.fqdn }}/[stream]/</div></div>
+      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value"><a href="https://stream.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://stream.{{ settings.fqdn }}</a> <span style="color:var(--text-dim);font-size:11px">↗</span></div></div>
       {% else %}
-      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value">http://{{ settings.server_ip }}:5080</div></div>
-      <div class="info-item"><div class="info-label">HLS Streams</div><div class="info-value">http://{{ settings.server_ip }}:8888/[stream]/</div></div>
+      <div class="info-item"><div class="info-label">Web Console</div><div class="info-value"><a href="http://{{ settings.server_ip }}:5080" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">http://{{ settings.server_ip }}:5080</a> <span style="color:var(--text-dim);font-size:11px">↗</span></div></div>
       {% endif %}
-      <div class="info-item"><div class="info-label">RTSP</div><div class="info-value">rtsp://[server]:8554/[stream]</div></div>
-      <div class="info-item"><div class="info-label">SRT</div><div class="info-value">srt://[server]:8890?streamid=[stream]</div></div>
-    </div>
-  </div>
-
-  <!-- Protocol ports -->
-  <div class="card">
-    <div class="card-title">Protocol Ports</div>
-    <div class="proto-grid">
-      <div class="proto-item"><div class="proto-name">RTSP</div><div class="proto-port">8554/tcp</div></div>
-      <div class="proto-item"><div class="proto-name">RTSPS</div><div class="proto-port">8322/tcp</div></div>
-      <div class="proto-item"><div class="proto-name">HLS</div><div class="proto-port">8888/tcp</div></div>
-      <div class="proto-item"><div class="proto-name">SRT</div><div class="proto-port">8890/udp</div></div>
-      <div class="proto-item"><div class="proto-name">API</div><div class="proto-port">9997/tcp</div></div>
-      <div class="proto-item"><div class="proto-name">Web Editor</div><div class="proto-port">5000/tcp</div></div>
     </div>
   </div>
 
@@ -2410,7 +3293,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
     {% if settings.fqdn %}
     <div style="background:rgba(16,185,129,.06);border:1px solid rgba(16,185,129,.15);border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:12px;color:var(--text-secondary)">
       Caddy domain detected — <span style="color:var(--green)">SSL will be configured automatically</span><br>
-      Web editor will be available at <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">https://video.{{ settings.fqdn }}</span>
+      Web editor will be available at <span style="font-family:'JetBrains Mono',monospace;color:var(--cyan)">https://stream.{{ settings.fqdn }}</span>
     </div>
     {% endif %}
     <button class="btn btn-primary" id="deploy-btn" onclick="startDeploy()">🚀 Deploy MediaMTX</button>
@@ -2434,10 +3317,11 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
       <input class="form-input" id="uninstall-password" type="password" placeholder="Confirm your password">
     </div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-danger" onclick="doUninstall()">Uninstall</button>
+      <button class="btn btn-ghost" id="uninstall-cancel-btn" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-danger" id="uninstall-confirm-btn" onclick="doUninstall()">Uninstall</button>
     </div>
     <div id="uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+    <div id="uninstall-progress" class="uninstall-progress-row" style="display:none" aria-live="polite"></div>
   </div>
 </div>
 
@@ -2501,12 +3385,36 @@ function loadLogs() {
 
 function doUninstall() {
   const password = document.getElementById('uninstall-password').value;
+  const msgEl = document.getElementById('uninstall-msg');
+  const progressEl = document.getElementById('uninstall-progress');
+  const cancelBtn = document.getElementById('uninstall-cancel-btn');
+  const confirmBtn = document.getElementById('uninstall-confirm-btn');
+  msgEl.textContent = '';
+  progressEl.style.display = 'flex';
+  progressEl.innerHTML = '<span class="uninstall-spinner"></span><span>Uninstalling…</span>';
+  confirmBtn.disabled = true;
+  cancelBtn.disabled = true;
   fetch('/api/mediamtx/uninstall', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({password})
   }).then(r => r.json()).then(d => {
-    if (d.error) document.getElementById('uninstall-msg').textContent = d.error;
-    else location.reload();
+    if (d.error) {
+      msgEl.textContent = d.error;
+      progressEl.style.display = 'none';
+      progressEl.innerHTML = '';
+      confirmBtn.disabled = false;
+      cancelBtn.disabled = false;
+      return;
+    }
+    progressEl.innerHTML = '<span class="uninstall-spinner"></span><span>Done. Reloading…</span>';
+    setTimeout(() => location.reload(), 800);
+  }).catch(err => {
+    msgEl.textContent = 'Request failed: ' + (err.message || 'network error');
+    progressEl.style.display = 'none';
+    progressEl.innerHTML = '';
+    confirmBtn.disabled = false;
+    cancelBtn.disabled = false;
   });
 }
 
@@ -2516,14 +3424,205 @@ document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); }
 </script>
 </body></html>'''
 
+CLOUDTAK_PAGE_JS = r'''window.logIndex = 0;
+window.logInterval = null;
+
+window.startRedeploy = function() {
+  var btn = document.getElementById("redeploy-btn");
+  var logCard = document.getElementById("log-card");
+  var dyn = document.getElementById("deploy-log-dyn");
+  var stat = document.getElementById("deploy-log");
+  function showErr(s) {
+    if (dyn) dyn.textContent = s;
+    if (stat) stat.textContent = s;
+    if (btn) btn.disabled = false;
+    alert(s);
+  }
+  if (btn) btn.disabled = true;
+  if (logCard) { logCard.style.display = "block"; logCard.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+  var initMsg = "Updating config and restarting...";
+  if (dyn) dyn.textContent = initMsg;
+  if (stat) stat.textContent = initMsg;
+  var condLog = document.getElementById("deploy-log");
+  if (condLog && condLog.closest(".card")) condLog.closest(".card").style.display = "none";
+  window.logIndex = 0;
+  fetch("/api/cloudtak/redeploy", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({}),
+    credentials: "same-origin"
+  }).then(function(r) {
+    if (!r.ok) {
+      return r.text().then(function(t) { throw new Error(r.status + ": " + (t || r.statusText).slice(0, 200)); });
+    }
+    return r.json();
+  }).then(function(d) {
+    if (d && d.error) {
+      showErr("Error: " + d.error);
+    } else {
+      window.pollLog(btn);
+    }
+  }).catch(function(e) {
+    showErr("Failed: " + (e && e.message ? e.message : String(e)));
+  });
+};
+
+window.startDeploy = function() {
+  document.getElementById("deploy-btn").disabled = true;
+  document.getElementById("log-card").style.display = "block";
+  document.getElementById("deploy-log-dyn").textContent = "Starting deployment...";
+  window.logIndex = 0;
+  fetch("/api/cloudtak/deploy", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      document.getElementById("deploy-log-dyn").textContent = "Error: " + d.error;
+      document.getElementById("deploy-btn").disabled = false;
+    } else {
+      window.pollLog(null);
+    }
+  });
+};
+
+window.pollLog = function(redeployBtn) {
+  if (window.logInterval) clearInterval(window.logInterval);
+  function doPoll() {
+    fetch("/api/cloudtak/deploy/log?index=" + window.logIndex, { credentials: "same-origin" })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d) return;
+        if (d.entries && d.entries.length) {
+          var text = d.entries.join("\n") + "\n";
+          var dyn = document.getElementById("deploy-log-dyn");
+          var stat = document.getElementById("deploy-log");
+          if (window.logIndex === 0) {
+            if (dyn) dyn.textContent = text;
+            if (stat) stat.textContent = text;
+          } else {
+            if (dyn) dyn.textContent += text;
+            if (stat) stat.textContent += text;
+          }
+          if (dyn) dyn.scrollTop = dyn.scrollHeight;
+          if (stat) stat.scrollTop = stat.scrollHeight;
+          window.logIndex += d.entries.length;
+        }
+        if (!d.running) {
+          clearInterval(window.logInterval);
+          window.logInterval = null;
+          if (redeployBtn) redeployBtn.disabled = false;
+          if (d.error && dyn) dyn.textContent = (dyn.textContent || "") + "\nError (see log above)";
+          if (d.complete) setTimeout(function() { location.reload(); }, 1500);
+        }
+      })
+      .catch(function(err) {
+        clearInterval(window.logInterval);
+        window.logInterval = null;
+        if (redeployBtn) redeployBtn.disabled = false;
+        var dyn = document.getElementById("deploy-log-dyn");
+        if (dyn) dyn.textContent = (dyn.textContent || "") + "\nRequest failed: " + (err && err.message ? err.message : String(err));
+      });
+  }
+  doPoll();
+  window.logInterval = setInterval(doPoll, 800);
+};
+
+window.control = function(action) {
+  document.getElementById("control-status").textContent = action + "...";
+  fetch("/api/cloudtak/control", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({action: action})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    document.getElementById("control-status").textContent = d.running ? "Running" : "Stopped";
+    setTimeout(function() { document.getElementById("control-status").textContent = ""; }, 3000);
+  });
+};
+
+var activeContainer = "";
+function filterLogs(containerName) {
+  activeContainer = containerName || "";
+  document.querySelectorAll(".svc-card").forEach(function(c) { c.style.borderColor = ""; c.style.boxShadow = ""; });
+  var id = containerName ? "svc-" + containerName : "svc-all";
+  var card = document.getElementById(id);
+  if (card) { card.style.borderColor = "var(--cyan)"; card.style.boxShadow = "0 0 0 1px var(--cyan)"; }
+  var label = document.getElementById("log-filter-label");
+  if (label) label.textContent = containerName ? "\u2014 " + containerName : "";
+  loadContainerLogs();
+}
+function loadContainerLogs() {
+  var el = document.getElementById("container-logs");
+  if (!el) return;
+  var url = activeContainer ? "/api/cloudtak/logs?lines=80&container=" + encodeURIComponent(activeContainer) : "/api/cloudtak/logs?lines=80";
+  fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+    el.textContent = (d.entries && d.entries.length) ? d.entries.join("\\n") : "(no log output)";
+    el.scrollTop = el.scrollHeight;
+  }).catch(function() { if (el) el.textContent = "Failed to load logs"; });
+}
+if (document.getElementById("container-logs")) { filterLogs(""); setInterval(loadContainerLogs, 8000); }
+
+window.doUninstall = function() {
+  var password = document.getElementById("uninstall-password").value;
+  var msgEl = document.getElementById("uninstall-msg");
+  var progressEl = document.getElementById("uninstall-progress");
+  var cancelBtn = document.getElementById("uninstall-cancel-btn");
+  var confirmBtn = document.getElementById("uninstall-confirm-btn");
+  msgEl.textContent = "";
+  progressEl.innerHTML = "<span class=\"uninstall-spinner\"></span><span>Uninstalling...</span>";
+  confirmBtn.disabled = true;
+  cancelBtn.disabled = true;
+  fetch("/api/cloudtak/uninstall", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({password: password})
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) {
+      msgEl.textContent = d.error;
+      progressEl.innerHTML = "";
+      confirmBtn.disabled = false;
+      cancelBtn.disabled = false;
+      return;
+    }
+    progressEl.innerHTML = "<span class=\"uninstall-spinner\"></span><span>Stopping containers and removing data...</span>";
+    var poll = setInterval(function() {
+      fetch("/api/cloudtak/uninstall/status").then(function(r) { return r.json(); }).then(function(s) {
+        if (!s.running) {
+          clearInterval(poll);
+          if (s.error) {
+            msgEl.textContent = s.error;
+            progressEl.innerHTML = "";
+            confirmBtn.disabled = false;
+            cancelBtn.disabled = false;
+          } else {
+            progressEl.innerHTML = "<span class=\"uninstall-spinner\"></span><span>Done. Reloading...</span>";
+            setTimeout(function() { location.reload(); }, 800);
+          }
+        } else {
+          progressEl.innerHTML = "<span class=\"uninstall-spinner\"></span><span>Uninstalling... (this may take 1-2 minutes)</span>";
+        }
+      }).catch(function() { clearInterval(poll); progressEl.innerHTML = ""; confirmBtn.disabled = false; cancelBtn.disabled = false; });
+    }, 1000);
+  }).catch(function(err) {
+    msgEl.textContent = "Request failed: " + (err.message || "network error");
+    progressEl.innerHTML = "";
+    confirmBtn.disabled = false;
+    cancelBtn.disabled = false;
+  });
+};
+'''
+
 CLOUDTAK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>CloudTAK — TAKWERX Console</title>
+<title>CloudTAK — infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex}
-.sidebar{width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',sans-serif;min-height:100vh;display:flex;flex-direction:row}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
 .sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
 .sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--text-primary)}
 .sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
@@ -2531,7 +3630,7 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03);border-left-color:var(--border-hover)}
 .nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
 .nav-icon{font-size:15px;width:18px;text-align:center}
-.main{flex:1;overflow-y:auto;padding:32px}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
 .page-header{margin-bottom:28px}
 .page-header h1{font-size:22px;font-weight:700;color:var(--text-primary)}
 .page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
@@ -2570,21 +3669,19 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 .tab{padding:7px 16px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text-dim);transition:all .15s}
 .tab.active{background:var(--bg-card);color:var(--text-primary)}
 .tab-panel{display:none}.tab-panel.active{display:block}
+.uninstall-spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes uninstall-spin{to{transform:rotate(360deg)}}
+.uninstall-progress-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text-secondary)}
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:8px}
+.svc-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px}
+.svc-name{color:var(--text-secondary);font-weight:600;margin-bottom:4px}
+.svc-status{font-size:11px}
 </style></head>
-<body>
-<nav class="sidebar">
-  <div class="sidebar-logo"><span>TAKWERX</span><small>Console v{{ version }}</small></div>
-  <a href="/" class="nav-item"><span class="nav-icon">⚡</span>Dashboard</a>
-  <a href="/caddy" class="nav-item"><span class="nav-icon">🔒</span>Caddy SSL</a>
-  <a href="/takserver" class="nav-item"><span class="nav-icon">📡</span>TAK Server</a>
-  <a href="/authentik" class="nav-item"><span class="nav-icon">🔐</span>Authentik</a>
-  <a href="/takportal" class="nav-item"><span class="nav-icon">🌐</span>TAK Portal</a>
-  <a href="/cloudtak" class="nav-item active"><span class="nav-icon">☁️</span>CloudTAK</a>
-  <a href="/emailrelay" class="nav-item"><span class="nav-icon">📧</span>Email Relay</a>
-</nav>
+<body data-deploying="{{ 'true' if deploying else 'false' }}">
+{{ sidebar_html }}
 <div class="main">
   <div class="page-header">
-    <h1>☁️ CloudTAK</h1>
+    <h1><img src="{{ cloudtak_icon }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px">CloudTAK</h1>
     <p>Browser-based TAK client — in-browser map and situational awareness via TAK Server</p>
   </div>
 
@@ -2597,40 +3694,50 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% endif %}
 
   {% if cloudtak.installed %}
-  <!-- Running info -->
+  <!-- Controls at top -->
+  <div class="card">
+    <div class="card-title">Controls</div>
+    <div class="controls">
+      <button class="btn {% if cloudtak.running %}btn-ghost{% else %}btn-success{% endif %}" onclick="control('start')">▶ Start</button>
+      <button class="btn {% if cloudtak.running %}btn-danger{% else %}btn-ghost{% endif %}" onclick="control('stop')">⏹ Stop</button>
+      <button class="btn btn-ghost" onclick="control('restart')">↺ Restart</button>
+      <button type="button" class="btn btn-primary" onclick="startRedeploy()" id="redeploy-btn">🔄 Update config & restart</button>
+      <button class="btn btn-danger" onclick="document.getElementById('uninstall-modal').classList.add('open')">🗑 Uninstall</button>
+    </div>
+    <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
+  </div>
+
+  <!-- Access -->
   <div class="card">
     <div class="card-title">Access</div>
     <div class="info-grid">
       {% if settings.fqdn %}
-      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value">https://map.{{ settings.fqdn }}</div></div>
+      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value"><a href="https://map.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://map.{{ settings.fqdn }}</a> <span style="color:var(--text-dim);font-size:11px">↗</span></div></div>
       <div class="info-item"><div class="info-label">Tile Server</div><div class="info-value">https://tiles.map.{{ settings.fqdn }}</div></div>
-      <div class="info-item"><div class="info-label">Video (MediaMTX)</div><div class="info-value">https://video.{{ settings.fqdn }}</div></div>
+      <div class="info-item"><div class="info-label">Video (MediaMTX)</div><div class="info-value"><a href="https://video.{{ settings.fqdn }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">https://video.{{ settings.fqdn }}</a></div></div>
       {% else %}
-      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value">http://{{ settings.server_ip }}:5000</div></div>
+      <div class="info-item"><div class="info-label">Web UI</div><div class="info-value"><a href="http://{{ settings.server_ip }}:5000" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none">http://{{ settings.server_ip }}:5000</a> <span style="color:var(--text-dim);font-size:11px">↗</span></div></div>
       <div class="info-item"><div class="info-label">Tile Server</div><div class="info-value">http://{{ settings.server_ip }}:5002</div></div>
       {% endif %}
       <div class="info-item"><div class="info-label">Install Dir</div><div class="info-value">~/CloudTAK</div></div>
     </div>
   </div>
 
-  <!-- Controls -->
+  {% if container_info.get('containers') %}
   <div class="card">
-    <div class="card-title">Controls</div>
-    <div class="controls">
-      <button class="btn btn-success" onclick="control('start')">▶ Start</button>
-      <button class="btn btn-ghost" onclick="control('stop')">⏹ Stop</button>
-      <button class="btn btn-ghost" onclick="control('restart')">↺ Restart</button>
-      <button class="btn btn-ghost" onclick="loadLogs()">📋 Logs</button>
-      <button class="btn btn-danger" onclick="document.getElementById('uninstall-modal').classList.add('open')">🗑 Uninstall</button>
+    <div class="card-title">Services</div>
+    <div class="svc-grid">
+      {% for c in container_info.containers %}
+      <div class="svc-card" onclick="filterLogs('{{ c.name }}')" style="cursor:pointer;border-color:{{ 'var(--red)' if 'unhealthy' in c.status else 'var(--green)' if 'Up' in c.status else 'var(--border)' }}" id="svc-{{ c.name }}"><div class="svc-name">{{ c.name }}</div><div class="svc-status" style="color:{{ 'var(--red)' if 'unhealthy' in c.status else 'var(--green)' }}">● {{ c.status }}</div></div>
+      {% endfor %}
+      <div class="svc-card" onclick="filterLogs('')" style="cursor:pointer" id="svc-all"><div class="svc-name">all containers</div><div class="svc-status" style="color:var(--text-dim)">● combined</div></div>
     </div>
-    <div id="control-status" style="margin-top:12px;font-size:12px;color:var(--text-dim)"></div>
   </div>
-
-  <!-- Container logs -->
-  <div class="card" id="logs-card" style="display:none">
-    <div class="card-title">Container Logs</div>
+  <div class="card">
+    <div class="card-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
     <div class="log-box" id="container-logs">Loading...</div>
   </div>
+  {% endif %}
 
   {% else %}
   <!-- Deploy form -->
@@ -2659,8 +3766,8 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
   {% endif %}
 
   <!-- Deploy log -->
-  {% if deploying or deploy_done %}
-  <div class="card">
+  {% if deploying %}
+  <div class="card" id="deploy-log-card">
     <div class="card-title">Deploy Log</div>
     <div class="log-box" id="deploy-log">Initializing...</div>
   </div>
@@ -2675,111 +3782,36 @@ body{background:var(--bg-deep);color:var(--text-primary);font-family:'DM Sans',s
 <!-- Uninstall modal -->
 <div class="modal-overlay" id="uninstall-modal">
   <div class="modal">
-    <h3>⚠ Uninstall CloudTAK?</h3>
+    <h3>&#x26a0; Uninstall CloudTAK?</h3>
     <p>This will stop and remove all CloudTAK Docker containers, volumes, and the ~/CloudTAK directory. This cannot be undone.</p>
     <div class="form-group">
       <label class="form-label">Admin Password</label>
       <input class="form-input" id="uninstall-password" type="password" placeholder="Confirm your password">
     </div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-danger" onclick="doUninstall()">Uninstall</button>
+      <button class="btn btn-ghost" id="uninstall-cancel-btn" onclick="document.getElementById('uninstall-modal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-danger" id="uninstall-confirm-btn" onclick="doUninstall()">Uninstall</button>
     </div>
     <div id="uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+    <div id="uninstall-progress" class="uninstall-progress-row" style="margin-top:8px;font-size:13px;color:var(--text-secondary);min-height:24px" aria-live="polite"></div>
   </div>
 </div>
 
+<script src="/cloudtak/page.js"></script>
 <script>
-let logIndex = 0;
-let logInterval = null;
-
-function startDeploy() {
-  document.getElementById('deploy-btn').disabled = true;
-  document.getElementById('log-card').style.display = 'block';
-  document.getElementById('deploy-log-dyn').textContent = 'Starting deployment...';
-  logIndex = 0;
-  fetch('/api/cloudtak/deploy', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({})
-  }).then(r => r.json()).then(d => {
-    if (d.error) {
-      document.getElementById('deploy-log-dyn').textContent = 'Error: ' + d.error;
-      document.getElementById('deploy-btn').disabled = false;
-    } else {
-      pollLog();
-    }
-  });
-}
-
-function pollLog() {
-  logInterval = setInterval(() => {
-    fetch('/api/cloudtak/deploy/log?index=' + logIndex)
-      .then(r => r.json()).then(d => {
-        if (d.entries && d.entries.length) {
-          const box = document.getElementById('deploy-log-dyn') || document.getElementById('deploy-log');
-          if (box) {
-            if (logIndex === 0) box.textContent = '';
-            box.textContent += d.entries.join(String.fromCharCode(10)) + String.fromCharCode(10);
-            box.scrollTop = box.scrollHeight;
-          }
-          logIndex += d.entries.length;
-        }
-        if (!d.running) {
-          clearInterval(logInterval);
-          if (d.complete) setTimeout(() => location.reload(), 1500);
-        }
-      });
-  }, 800);
-}
-
-function control(action) {
-  document.getElementById('control-status').textContent = action + '...';
-  fetch('/api/cloudtak/control', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({action})
-  }).then(r => r.json()).then(d => {
-    document.getElementById('control-status').textContent = d.running ? '✓ Running' : '○ Stopped';
-    setTimeout(() => document.getElementById('control-status').textContent = '', 3000);
-  });
-}
-
-function loadLogs() {
-  const card = document.getElementById('logs-card');
-  card.style.display = 'block';
-  fetch('/api/cloudtak/logs?lines=80').then(r => r.json()).then(d => {
-    document.getElementById('container-logs').textContent = d.entries.join(String.fromCharCode(10)) || '(no log output)';
-  });
-}
-
-function doUninstall() {
-  const password = document.getElementById('uninstall-password').value;
-  fetch('/api/cloudtak/uninstall', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password})
-  }).then(r => r.json()).then(d => {
-    if (d.error) {
-      document.getElementById('uninstall-msg').textContent = d.error;
-    } else {
-      location.reload();
-    }
-  });
-}
-
-// Auto-poll if deploy is in progress
-{% if deploying %}
-document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
-{% endif %}
+(function(){
+  var deploying = document.body.getAttribute('data-deploying') === 'true';
+  if (deploying) { document.addEventListener('DOMContentLoaded', function() { window.logIndex = 0; if (window.pollLog) window.pollLog(null); }); }
+})();
 </script>
 </body></html>'''
 
 EMAIL_RELAY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Email Relay — TAKWERX Console</title>
+<title>Email Relay</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
 .top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
 .header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
@@ -2788,9 +3820,8 @@ EMAIL_RELAY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
 .btn-back{color:var(--text-dim);text-decoration:none;font-size:13px;padding:6px 14px;border:1px solid var(--border);border-radius:6px;transition:all 0.2s}.btn-back:hover{color:var(--text-secondary);border-color:var(--border-hover)}
 .btn-logout{color:var(--text-dim);text-decoration:none;font-size:13px;padding:6px 14px;border:1px solid var(--border);border-radius:6px;transition:all 0.2s}.btn-logout:hover{color:var(--red);border-color:rgba(239,68,68,0.3)}
 .os-badge{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);padding:4px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px}
-.main{max-width:1000px;margin:0 auto;padding:32px 40px}
 .section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;margin-top:24px}
-.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
 .status-info{display:flex;align-items:center;gap:16px}
 .status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
@@ -2816,22 +3847,32 @@ select.input-field{cursor:pointer}
 .config-table td{padding:10px 14px;border-bottom:1px solid var(--border)}
 .config-table td:first-child{color:var(--text-dim);width:140px}
 .config-table td:last-child{color:var(--cyan)}
-.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);margin-top:40px}
+.status-logo-wrap{display:flex;align-items:center;gap:10px}
+.status-logo{height:36px;width:auto;max-width:100px;object-fit:contain}
+.status-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:18px;color:var(--text-primary)}
 .tag{display:inline-block;padding:3px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600}
 .tag-green{background:rgba(16,185,129,0.1);color:var(--green);border:1px solid rgba(16,185,129,0.2)}
 .tag-blue{background:rgba(59,130,246,0.1);color:var(--accent);border:1px solid rgba(59,130,246,0.2)}
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin-left:0;margin-right:auto}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header">
-<div class="header-left"><div class="header-icon">📧</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Email Relay</div></div></div>
-<div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name','Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div>
-</header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
 
 <!-- Status Banner -->
 <div class="status-banner">
 {% if email.installed and email.running %}
-<div class="status-info"><div class="status-icon running">📧</div><div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">outgoing_mail</span><span class="status-name">Email Relay</span></div><div>
 <div class="status-text" style="color:var(--green)">Running</div>
 <div class="status-detail">Postfix relay active{% if relay_config.get('provider') %} · {{ providers.get(relay_config.provider,{}).get('name', relay_config.provider) }}{% endif %}{% if relay_config.get('from_addr') %} · {{ relay_config.from_addr }}{% endif %}</div>
 </div></div>
@@ -2841,13 +3882,13 @@ select.input-field{cursor:pointer}
 <button class="control-btn btn-stop" onclick="emailUninstall()" style="margin-left:8px">🗑 Remove</button>
 </div>
 {% elif email.installed %}
-<div class="status-info"><div class="status-icon stopped">📧</div><div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">outgoing_mail</span><span class="status-name">Email Relay</span></div><div>
 <div class="status-text" style="color:var(--red)">Stopped</div>
 <div class="status-detail">Postfix is installed but not running</div>
 </div></div>
 <div class="controls"><button class="control-btn btn-start" onclick="emailControl('start')">▶ Start</button></div>
 {% else %}
-<div class="status-info"><div class="status-icon not-installed">📧</div><div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">outgoing_mail</span><span class="status-name">Email Relay</span></div><div>
 <div class="status-text" style="color:var(--text-dim)">Not Installed</div>
 <div class="status-detail">Postfix email relay — apps use localhost, provider handles delivery</div>
 </div></div>
@@ -2968,8 +4009,8 @@ Switching providers later requires only updating Postfix credentials — no chan
 </div>
 {% endif %}
 
-</main>
-<footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type','') }} · {{ settings.get('server_ip','') }}</footer>
+</div>
+<footer class="footer"></footer>
 
 <script>
 var PROVIDERS = {{ providers | tojson }};
@@ -3057,10 +4098,11 @@ async function emailUninstall(){
 
 
 CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Caddy SSL — TAKWERX Console</title>
+<title>Caddy SSL</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
 .top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
 .header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
@@ -3071,7 +4113,7 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 .os-badge{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);padding:4px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px}
 .main{max-width:1000px;margin:0 auto;padding:32px 40px}
 .section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;margin-top:24px}
-.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
 .status-info{display:flex;align-items:center;gap:16px}
 .status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
@@ -3086,25 +4128,38 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 .input-field{width:100%;padding:12px 16px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;transition:border-color 0.2s}
 .input-field:focus{border-color:var(--accent)}
 .input-label{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);margin-bottom:8px;display:block}
-.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);margin-top:40px}
+.status-logo-wrap{display:flex;align-items:center;gap:10px}
+.status-logo{height:36px;width:auto;max-width:100px;object-fit:contain}
+.status-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:18px;color:var(--text-primary)}
 .benefit-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:16px}
 .benefit-item{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:12px}
 .benefit-item .icon{font-size:18px;margin-bottom:6px}
 .benefit-item .title{font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--text-secondary);margin-bottom:4px}
 .benefit-item .desc{color:var(--text-dim);line-height:1.4}
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Caddy SSL</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
 <div class="status-banner">
 {% if caddy.installed and caddy.running %}
-<div class="status-info"><div class="status-icon running">🔒</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Caddy is active{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div></div></div>
 <div class="controls"><button class="control-btn" onclick="caddyControl('reload')">↻ Reload</button><button class="control-btn" onclick="caddyControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="caddyControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="caddyUninstall()" style="margin-left:8px">🗑 Remove</button></div>
 {% elif caddy.installed %}
-<div class="status-info"><div class="status-icon stopped">🔒</div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Caddy is installed but not running</div></div></div>
 <div class="controls"><button class="control-btn btn-start" onclick="caddyControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="caddyUninstall()" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
-<div class="status-info"><div class="status-icon not-installed">🔒</div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Set up a domain for full functionality</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ caddy_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Set up a domain for full functionality</div></div></div>
 {% endif %}
 </div>
 
@@ -3121,17 +4176,23 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:12px">Create DNS A records for *.{{ settings.get('fqdn', '') }} or individual subdomains pointing to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
 </div>
-<div class="section-title">Access Links</div>
+{% if configured_urls %}
+<div class="section-title">Configured URLs</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-<a href="https://console.{{ settings.get('fqdn', '') }}" target="_blank" style="padding:8px 14px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;text-decoration:none;font-weight:600">⚡ console</a>
-<a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" style="padding:8px 14px;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;text-decoration:none">🗺️ tak</a>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':9090' }}" target="_blank" style="padding:8px 14px;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;text-decoration:none">🔐 authentik</a>
-<a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" style="padding:8px 14px;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;text-decoration:none">👥 takportal</a>
-<a href="{{ 'https://nodered.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':1880' }}" target="_blank" style="padding:8px 14px;background:var(--bg-surface);border:1px solid var(--border);color:var(--text-secondary);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;text-decoration:none">🔴 nodered</a>
+<div style="display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,1.4fr) 1fr;gap:12px 24px;align-items:center;font-size:13px;border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:12px">
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Service</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">URL</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">Where it goes</div>
 </div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:10px">Links activate as services are deployed</div>
+{% for u in configured_urls %}
+<div style="display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,1.4fr) 1fr;gap:12px 24px;align-items:center;font-size:13px;padding:10px 0;border-bottom:1px solid var(--border)">
+<div style="font-weight:600;color:var(--text-primary)">{{ u.name }}</div>
+<div><a href="{{ u.url }}" target="_blank" rel="noopener noreferrer" style="color:var(--cyan);text-decoration:none;font-family:'JetBrains Mono',monospace;font-size:12px;word-break:break-all">{{ u.host }}</a> <span style="color:var(--text-dim);font-size:11px">↗</span></div>
+<div style="color:var(--text-dim);font-size:12px">{{ u.desc }}</div>
 </div>
+{% endfor %}
+</div>
+{% endif %}
 <div class="section-title">Caddyfile</div>
 <div style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">{{ caddyfile }}</div>
 {% elif not caddy.installed %}
@@ -3145,7 +4206,7 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 <div style="max-width:500px;margin:0 auto">
 <label class="input-label">Base Domain</label>
 <input type="text" id="domain-input" class="input-field" placeholder="yourdomain.com" style="margin-bottom:8px">
-<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:20px">Subdomains auto-configured: console · tak · authentik · portal · nodered · map · tiles.map · video<br>Point a wildcard DNS (*.yourdomain.com) or individual A records to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:20px">Subdomains auto-configured: infratak · console · tak · authentik · portal · nodered · map · tiles.map · video<br>Point a wildcard DNS (*.yourdomain.com) or individual A records to <span style="color:var(--cyan)">{{ settings.get('server_ip', '') }}</span></div>
 <div style="text-align:center">
 <button onclick="deployCaddy()" id="deploy-btn" style="padding:14px 40px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:600;cursor:pointer">🚀 Deploy Caddy</button>
 </div>
@@ -3156,11 +4217,11 @@ CADDY_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 <div class="benefit-item"><div class="icon">📱</div><div class="title">ATAK QR Enrollment</div><div class="desc">Android devices can enroll via QR code with trusted SSL certificates</div></div>
 <div class="benefit-item"><div class="icon">🔐</div><div class="title">TAK Portal Auth</div><div class="desc">Secure TAK Portal with Authentik SSO — no more anonymous access</div></div>
 <div class="benefit-item"><div class="icon">🔒</div><div class="title">Trusted SSL</div><div class="desc">Let's Encrypt certificates — no more browser warnings</div></div>
-<div class="benefit-item"><div class="icon">📹</div><div class="title">Secure Streaming</div><div class="desc">MediaMTX streams over HTTPS with its own subdomain</div></div>
+<div class="benefit-item"><div class="icon"><img src="{{ mediamtx_logo_url }}" alt="" style="width:28px;height:28px;object-fit:contain"></div><div class="title">Secure Streaming</div><div class="desc">MediaMTX streams over HTTPS with its own subdomain</div></div>
 </div>
 {% endif %}
-</main>
-<footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type', '') }} · {{ settings.get('server_ip', '') }}</footer>
+</div>
+<footer class="footer"></footer>
 <script>
 async function deployCaddy(){
     var domain=document.getElementById('domain-input').value.trim();
@@ -3205,7 +4266,10 @@ function pollCaddyLog(){
 }
 async function caddyControl(action){
     try{var r=await fetch('/api/caddy/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});
-    var d=await r.json();setTimeout(()=>location.reload(),2000)}catch(e){alert('Error: '+e.message)}
+    var d=await r.json();
+    if(d.success){setTimeout(()=>location.reload(),1500)}
+    else{alert('Caddy '+action+' failed: '+(d.output||d.error||'unknown'))}
+    }catch(e){alert('Error: '+e.message)}
 }
 async function updateDomain(){
     var domain=document.getElementById('domain-input').value.trim();
@@ -3222,10 +4286,10 @@ async function caddyUninstall(){
 </body></html>'''
 
 CERTS_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Certificates · TAKWERX Console</title>
+<title>Certificates · infra-TAK</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
 .top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
 .header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
@@ -3249,10 +4313,10 @@ CERTS_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 .filter-btns{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap}
 .filter-btn{padding:6px 14px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;transition:all 0.2s}
 .filter-btn:hover,.filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(59,130,246,0.05)}
-.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);margin-top:40px}
 </style></head><body>
 <div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Certificates</div></div></div><div class="header-right"><a href="/takserver" class="btn-back">← TAK Server</a></div></header>
+<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">infra-TAK</div><div class="header-subtitle">Certificates</div></div></div><div class="header-right"><a href="/takserver" class="btn-back">← TAK Server</a></div></header>
 <main class="main">
 <div class="section-title">Certificate Files</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px">
@@ -3272,7 +4336,7 @@ CERTS_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><
 </table>
 </div>
 </main>
-<footer class="footer">TAKWERX Console v{{ version }}</footer>
+<footer class="footer">infra-TAK</footer>
 <script>
 function filterCerts(ext){
     document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
@@ -3287,11 +4351,14 @@ function filterCerts(ext){
 </body></html>'''
 
 TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>TAK Portal — TAKWERX Console</title>
+<title>TAK Portal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
 .top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
 .header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
 .header-left{display:flex;align-items:center;gap:16px}.header-icon{font-size:28px}.header-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.5px}.header-subtitle{font-size:13px;color:var(--text-dim)}
@@ -3301,12 +4368,15 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .os-badge{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);padding:4px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px}
 .main{max-width:1000px;margin:0 auto;padding:32px 40px}
 .section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;margin-top:24px}
-.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
 .status-info{display:flex;align-items:center;gap:16px}
 .status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
 .status-text{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600}
 .status-detail{font-size:13px;color:var(--text-dim);margin-top:4px}
+.status-logo-wrap{display:flex;align-items:center;gap:10px}
+.status-logo{height:36px;width:auto;max-width:100px;object-fit:contain}
+.status-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:18px;color:var(--text-primary)}
 .controls{display:flex;gap:10px}
 .control-btn{padding:10px 20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-secondary);font-family:'JetBrains Mono',monospace;font-size:13px;cursor:pointer;transition:all 0.2s}
 .control-btn:hover{border-color:var(--border-hover);color:var(--text-primary)}
@@ -3320,33 +4390,52 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .deploy-btn{padding:14px 32px;border:none;border-radius:10px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;cursor:pointer;transition:all 0.2s;display:block;margin:24px auto}
 .deploy-btn:hover{transform:translateY(-1px);box-shadow:0 4px 24px rgba(59,130,246,0.25)}
 .deploy-log{background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;margin-top:16px}
-.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);margin-top:40px}
 .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:8px}
 .svc-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px}
 .svc-name{color:var(--text-secondary);font-weight:600;margin-bottom:4px}
 .svc-status{font-size:11px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
+.uninstall-spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes uninstall-spin{to{transform:rotate(360deg)}}
+.uninstall-progress-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text-secondary)}
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">TAK Portal</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
 <div class="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Portal installation in progress</div></div></div>
 {% elif portal.installed and portal.running %}
-<div class="status-info"><div class="status-icon running">👥</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">{{ container_info.get('status', 'Docker container active') }}</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">{{ container_info.get('status', 'Docker container active') }}</div></div></div>
 <div class="controls">
 <button class="control-btn btn-stop" onclick="portalControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="portalControl('restart')">🔄 Restart</button>
 <button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
 </div>
 {% elif portal.installed %}
-<div class="status-info"><div class="status-icon stopped">👥</div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="portalControl('start')">▶ Start</button>
 <button class="control-btn btn-update" onclick="portalControl('update')">⬆ Update</button>
 </div>
 {% else %}
-<div class="status-info"><div class="status-icon not-installed">👥</div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
 {% endif %}
 </div>
 
@@ -3388,11 +4477,11 @@ TAKPORTAL_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
-<button class="control-btn btn-remove" onclick="uninstallPortal()">🗑 Remove TAK Portal</button>
+<button class="control-btn btn-remove" onclick="document.getElementById('portal-uninstall-modal').classList.add('open')">🗑 Remove TAK Portal</button>
 </div>
 {% elif portal.installed %}
 <div style="margin-top:24px;text-align:center">
-<button class="control-btn btn-remove" onclick="uninstallPortal()">🗑 Remove TAK Portal</button>
+<button class="control-btn btn-remove" onclick="document.getElementById('portal-uninstall-modal').classList.add('open')">🗑 Remove TAK Portal</button>
 </div>
 {% else %}
 <div class="section-title">About TAK Portal</div>
@@ -3419,10 +4508,23 @@ Features: User creation with auto-cert generation, group management, mutual aid 
 <button onclick="window.location.href='/takportal'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
-</main>
-<footer class="footer">TAKWERX Console v{{ version }}</footer>
+</div>
+<div class="modal-overlay" id="portal-uninstall-modal">
+<div class="modal">
+<h3>⚠ Uninstall TAK Portal?</h3>
+<p>This will remove TAK Portal, its Docker containers, volumes, and data. This cannot be undone.</p>
+<label class="form-label">Admin Password</label>
+<input class="form-input" id="portal-uninstall-password" type="password" placeholder="Confirm your password">
+<div class="modal-actions">
+<button type="button" class="control-btn" id="portal-uninstall-cancel" onclick="document.getElementById('portal-uninstall-modal').classList.remove('open')">Cancel</button>
+<button type="button" class="control-btn btn-remove" id="portal-uninstall-confirm" onclick="doUninstallPortal()">Uninstall</button>
+</div>
+<div id="portal-uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+<div id="portal-uninstall-progress" class="uninstall-progress-row" style="display:none;margin-top:10px" aria-live="polite"></div>
+</div>
+</div>
+<footer class="footer"></footer>
 <script>
-async function showAkPassword(){
     var btn=document.getElementById('ak-pw-btn');
     var display=document.getElementById('ak-pw-display');
     if(display.style.display==='inline'){display.style.display='none';btn.textContent='🔑 Show Password';return}
@@ -3514,13 +4616,40 @@ async function loadContainerLogs(){
 if(document.getElementById('container-log')){loadContainerLogs();setInterval(loadContainerLogs,10000)}
 
 function uninstallPortal(){
-    var pw=prompt('Enter admin password to remove TAK Portal:');
-    if(!pw)return;
-    if(!confirm('This will remove TAK Portal, its Docker containers, volumes, and data. Continue?'))return;
-    fetch('/api/takportal/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})}).then(function(r){return r.json()}).then(function(d){
-        if(d.success){alert('TAK Portal removed.');window.location.href='/takportal'}
-        else alert('Error: '+(d.error||'Unknown'));
-    });
+    document.getElementById('portal-uninstall-modal').classList.add('open');
+}
+async function doUninstallPortal(){
+    var pw=document.getElementById('portal-uninstall-password').value;
+    if(!pw){document.getElementById('portal-uninstall-msg').textContent='Please enter your password';return;}
+    var msgEl=document.getElementById('portal-uninstall-msg');
+    var progressEl=document.getElementById('portal-uninstall-progress');
+    var cancelBtn=document.getElementById('portal-uninstall-cancel');
+    var confirmBtn=document.getElementById('portal-uninstall-confirm');
+    msgEl.textContent='';
+    progressEl.style.display='flex';
+    progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Uninstalling…</span>';
+    confirmBtn.disabled=true;
+    cancelBtn.disabled=true;
+    try{
+        var r=await fetch('/api/takportal/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+        var d=await r.json();
+        if(d.success){
+            progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Done. Reloading…</span>';
+            setTimeout(function(){window.location.href='/takportal';},800);
+        }else{
+            msgEl.textContent=d.error||'Uninstall failed';
+            progressEl.style.display='none';
+            progressEl.innerHTML='';
+            confirmBtn.disabled=false;
+            cancelBtn.disabled=false;
+        }
+    }catch(e){
+        msgEl.textContent='Request failed: '+e.message;
+        progressEl.style.display='none';
+        progressEl.innerHTML='';
+        confirmBtn.disabled=false;
+        cancelBtn.disabled=false;
+    }
 }
 
 {% if deploying %}pollDeployLog();{% endif %}
@@ -3664,6 +4793,7 @@ def authentik_uninstall():
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
+
 
 def run_authentik_deploy():
     def plog(msg):
@@ -4637,6 +5767,14 @@ entries:
                             plog(f"  ⚠ Outpost config: {str(e)[:100]}")
 
                     plog(f"  ✓ Forward auth ready for takportal.{fqdn}")
+
+                    # If Node-RED is installed, create Node-RED app in Authentik (same as TAK Portal)
+                    nodered_installed = (os.path.exists(os.path.expanduser('~/node-red/docker-compose.yml')) or
+                        os.path.exists(os.path.expanduser('~/node-red/settings.js')) or os.path.exists('/opt/nodered'))
+                    if nodered_installed:
+                        plog("")
+                        plog("  Configuring Authentik for Node-RED...")
+                        _ensure_authentik_nodered_app(fqdn, ak_token, plog)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
@@ -4693,11 +5831,14 @@ entries:
             pass
 
 AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Authentik — TAKWERX Console</title>
+<title>Authentik</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
 <style>
-:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
+:root{--bg-deep:#080b14;--bg-surface:#0f1219;--bg-card:#161b26;--border:#1e2736;--border-hover:#2a3548;--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--cyan:#06b6d4;--green:#10b981;--red:#ef4444;--yellow:#eab308}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'DM Sans',sans-serif;background:var(--bg-deep);color:var(--text-primary);min-height:100vh}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
 .top-bar{height:3px;background:linear-gradient(90deg,var(--accent),var(--cyan),var(--green))}
 .header{padding:20px 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg-surface)}
 .header-left{display:flex;align-items:center;gap:16px}.header-icon{font-size:28px}.header-title{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;letter-spacing:-0.5px}.header-subtitle{font-size:13px;color:var(--text-dim)}
@@ -4707,12 +5848,15 @@ AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .os-badge{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);padding:4px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px}
 .main{max-width:1000px;margin:0 auto;padding:32px 40px}
 .section-title{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-bottom:16px;margin-top:24px}
-.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
 .status-info{display:flex;align-items:center;gap:16px}
 .status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
 .status-text{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600}
 .status-detail{font-size:13px;color:var(--text-dim);margin-top:4px}
+.status-logo-wrap{display:flex;align-items:center;gap:10px}
+.status-logo{height:36px;width:auto;max-width:100px;max-height:36px;object-fit:contain}
+.status-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:18px;color:var(--text-primary)}
 .controls{display:flex;gap:10px}
 .control-btn{padding:10px 20px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-secondary);font-family:'JetBrains Mono',monospace;font-size:13px;cursor:pointer;transition:all 0.2s}
 .control-btn:hover{border-color:var(--border-hover);color:var(--text-primary)}
@@ -4730,29 +5874,48 @@ AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .svc-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px}
 .svc-name{color:var(--text-secondary);font-weight:600;margin-bottom:4px}
 .svc-status{font-size:11px}
-.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);border-top:1px solid var(--border);margin-top:40px}
+.footer{text-align:center;padding:24px;font-size:12px;color:var(--text-dim);margin-top:40px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
+.uninstall-spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes uninstall-spin{to{transform:rotate(360deg)}}
+.uninstall-progress-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text-secondary)}
+body{display:flex;min-height:100vh}
+.sidebar{width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Authentik</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
 <div class="status-banner">
 {% if deploying %}
 <div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">Authentik installation in progress</div></div></div>
 {% elif ak.installed and ak.running %}
-<div class="status-info"><div class="status-icon running">🔐</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">Identity provider active</div></div></div>
 <div class="controls">
 <button class="control-btn btn-stop" onclick="akControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="akControl('restart')">🔄 Restart</button>
 <button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
 </div>
 {% elif ak.installed %}
-<div class="status-info"><div class="status-icon stopped">🔐</div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker containers not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="akControl('start')">▶ Start</button>
 <button class="control-btn btn-update" onclick="akControl('update')">⬆ Update</button>
 </div>
 {% else %}
-<div class="status-info"><div class="status-icon not-installed">🔐</div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy Authentik for identity management & SSO</div></div></div>
+<div class="status-info"><div class="status-logo-wrap"><img src="{{ authentik_logo_url }}" alt="" class="status-logo"></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy Authentik for identity management & SSO</div></div></div>
 {% endif %}
 </div>
 
@@ -4771,7 +5934,7 @@ AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
@@ -4812,12 +5975,12 @@ AUTHENTIK_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
 <div style="margin-top:24px;text-align:center">
-<button class="control-btn btn-remove" onclick="uninstallAk()">🗑 Remove Authentik</button>
+<button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% elif ak.installed %}
 <div style="margin-top:24px;text-align:center">
 <button class="control-btn btn-start" onclick="akControl('start')" style="margin-right:12px">▶ Start</button>
-<button class="control-btn btn-remove" onclick="uninstallAk()">🗑 Remove Authentik</button>
+<button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
 {% else %}
 <div class="section-title">About Authentik</div>
@@ -4847,8 +6010,22 @@ It provides centralized user authentication and management for all your services
 <button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
-</main>
-<footer class="footer">TAKWERX Console v{{ version }}</footer>
+</div>
+<div class="modal-overlay" id="ak-uninstall-modal">
+<div class="modal">
+<h3>⚠ Uninstall Authentik?</h3>
+<p>This will remove Authentik, all Docker containers, volumes, images, and data. This cannot be undone.</p>
+<label class="form-label">Admin Password</label>
+<input class="form-input" id="ak-uninstall-password" type="password" placeholder="Confirm your password">
+<div class="modal-actions">
+<button type="button" class="control-btn" id="ak-uninstall-cancel" onclick="document.getElementById('ak-uninstall-modal').classList.remove('open')">Cancel</button>
+<button type="button" class="control-btn btn-remove" id="ak-uninstall-confirm" onclick="doUninstallAk()">Uninstall</button>
+</div>
+<div id="ak-uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+<div id="ak-uninstall-progress" class="uninstall-progress-row" style="display:none;margin-top:10px" aria-live="polite"></div>
+</div>
+</div>
+<footer class="footer"></footer>
 <script>
 async function showAkPassword(){
     var btn=document.getElementById('ak-pw-btn');
@@ -4960,13 +6137,40 @@ async function loadContainerLogs(){
 if(document.getElementById('container-log')){loadContainerLogs();setInterval(loadContainerLogs,10000)}
 
 function uninstallAk(){
-    var pw=prompt('Enter admin password to remove Authentik:');
-    if(!pw)return;
-    if(!confirm('This will remove Authentik, all Docker containers, volumes, images, and data. This cannot be undone. Continue?'))return;
-    fetch('/api/authentik/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})}).then(function(r){return r.json()}).then(function(d){
-        if(d.success){alert('Authentik removed.');window.location.href='/authentik'}
-        else alert('Error: '+(d.error||'Unknown'));
-    });
+    document.getElementById('ak-uninstall-modal').classList.add('open');
+}
+async function doUninstallAk(){
+    var pw=document.getElementById('ak-uninstall-password').value;
+    if(!pw){document.getElementById('ak-uninstall-msg').textContent='Please enter your password';return;}
+    var msgEl=document.getElementById('ak-uninstall-msg');
+    var progressEl=document.getElementById('ak-uninstall-progress');
+    var cancelBtn=document.getElementById('ak-uninstall-cancel');
+    var confirmBtn=document.getElementById('ak-uninstall-confirm');
+    msgEl.textContent='';
+    progressEl.style.display='flex';
+    progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Uninstalling…</span>';
+    confirmBtn.disabled=true;
+    cancelBtn.disabled=true;
+    try{
+        var r=await fetch('/api/authentik/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+        var d=await r.json();
+        if(d.success){
+            progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Done. Reloading…</span>';
+            setTimeout(function(){window.location.href='/authentik';},800);
+        }else{
+            msgEl.textContent=d.error||'Uninstall failed';
+            progressEl.style.display='none';
+            progressEl.innerHTML='';
+            confirmBtn.disabled=false;
+            cancelBtn.disabled=false;
+        }
+    }catch(e){
+        msgEl.textContent='Request failed: '+e.message;
+        progressEl.style.display='none';
+        progressEl.innerHTML='';
+        confirmBtn.disabled=false;
+        cancelBtn.disabled=false;
+    }
 }
 
 {% if deploying %}pollDeployLog();{% endif %}
@@ -5062,30 +6266,6 @@ def takserver_services():
     except Exception as e:
         services.append({'name': 'Error', 'icon': '❌', 'status': str(e)})
     return jsonify({'services': services, 'count': len([s for s in services if s['status'] == 'running'])})
-    """Tail the takserver-messaging.log file"""
-    log_path = '/opt/tak/logs/takserver-messaging.log'
-    offset = request.args.get('offset', 0, type=int)
-    lines = request.args.get('lines', 100, type=int)
-    if not os.path.exists(log_path):
-        return jsonify({'entries': [], 'offset': 0, 'size': 0})
-    try:
-        size = os.path.getsize(log_path)
-        if offset == 0:
-            # First load: grab last N lines
-            r = subprocess.run(f'tail -n {lines} "{log_path}"', shell=True, capture_output=True, text=True, timeout=10)
-            entries = r.stdout.strip().split('\n') if r.stdout.strip() else []
-            return jsonify({'entries': entries, 'offset': size, 'size': size})
-        elif size > offset:
-            # New content since last poll
-            with open(log_path, 'r') as f:
-                f.seek(offset)
-                new_data = f.read()
-            entries = new_data.strip().split('\n') if new_data.strip() else []
-            return jsonify({'entries': entries, 'offset': size, 'size': size})
-        else:
-            return jsonify({'entries': [], 'offset': offset, 'size': size})
-    except Exception as e:
-        return jsonify({'entries': [f'Error reading log: {str(e)}'], 'offset': offset, 'size': 0})
 
 @app.route('/api/takserver/uninstall', methods=['POST'])
 @login_required
@@ -5552,8 +6732,11 @@ def deploy_log_stream():
 # === Shared CSS ===
 BASE_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0');
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg-primary:#0a0e17;--bg-card:rgba(15,23,42,0.7);--bg-card-hover:rgba(15,23,42,0.9);--border:rgba(59,130,246,0.1);--border-hover:rgba(59,130,246,0.3);--text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-dim:#475569;--accent:#3b82f6;--accent-glow:rgba(59,130,246,0.15);--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;word-wrap:normal;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+:root{--bg-primary:#0a0e17;--bg-card:rgba(15,23,42,0.7);--bg-card-hover:rgba(15,23,42,0.9);--border:rgba(59,130,246,0.1);--border-hover:rgba(59,130,246,0.3);--text-primary:#f1f5f9;--text-secondary:#cbd5e1;--text-dim:#94a3b8;--accent:#3b82f6;--accent-glow:rgba(59,130,246,0.15);--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4}
 body{font-family:'DM Sans',sans-serif;background:var(--bg-primary);color:var(--text-primary);min-height:100vh}
 body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-image:linear-gradient(rgba(59,130,246,0.02) 1px,transparent 1px),linear-gradient(90deg,rgba(59,130,246,0.02) 1px,transparent 1px);background-size:60px 60px;pointer-events:none;z-index:0}
 .top-bar{position:fixed;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),var(--cyan),transparent);z-index:100}
@@ -5581,7 +6764,7 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background-
 """
 
 # === Login Template ===
-LOGIN_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAKWERX Console</title>
+LOGIN_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>infra-TAK</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -5592,19 +6775,20 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 .card{background:linear-gradient(145deg,rgba(15,23,42,0.95),rgba(15,23,42,0.8));border:1px solid rgba(59,130,246,0.15);border-radius:16px;padding:48px 40px;backdrop-filter:blur(20px);box-shadow:0 0 0 1px rgba(59,130,246,0.05),0 25px 50px rgba(0,0,0,0.5)}
 .logo{text-align:center;margin-bottom:36px}
 .logo-icon{width:56px;height:56px;background:linear-gradient(135deg,#1e40af,#0891b2);border-radius:14px;display:inline-flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:16px;box-shadow:0 8px 24px rgba(59,130,246,0.25)}
-.logo h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#e2e8f0}
+.logo h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#f1f5f9}
 .logo p{color:#64748b;font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase}
+.logo .built-by{font-size:10px;color:#94a3b8;margin-top:8px;text-transform:none;letter-spacing:0}
 .fg{margin-bottom:24px}
-.fg label{display:block;color:#94a3b8;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.fg input{width:100%;padding:14px 16px;background:rgba(15,23,42,0.6);border:1px solid rgba(59,130,246,0.2);border-radius:10px;color:#e2e8f0;font-family:'JetBrains Mono',monospace;font-size:15px;transition:all 0.2s}
+.fg label{display:block;color:#cbd5e1;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.fg input{width:100%;padding:14px 16px;background:rgba(15,23,42,0.6);border:1px solid rgba(59,130,246,0.2);border-radius:10px;color:#f1f5f9;font-family:'JetBrains Mono',monospace;font-size:15px;transition:all 0.2s}
 .fg input:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,0.1)}
 .btn{width:100%;padding:14px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer;transition:all 0.2s}
 .btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(59,130,246,0.3)}
 .err{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.2);color:#fca5a5;padding:12px 16px;border-radius:8px;font-size:14px;margin-bottom:20px;text-align:center}
-.ver{text-align:center;margin-top:20px;color:#334155;font-family:'JetBrains Mono',monospace;font-size:11px}
+.ver{text-align:center;margin-top:20px;color:#64748b;font-family:'JetBrains Mono',monospace;font-size:11px}
 </style></head><body>
 <div class="lc"><div class="card">
-<div class="logo"><div class="logo-icon">⚡</div><h1>TAKWERX Console</h1><p>Infrastructure Platform</p></div>
+<div class="logo"><div class="logo-icon">⚡</div><h1>infra-TAK</h1><p>TAK Infrastructure Platform</p><p class="built-by">built by TAKWERX</p></div>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}
 <form method="POST"><div class="fg"><label>Password</label><input type="password" name="password" autofocus placeholder="Enter admin password"></div><button type="submit" class="btn">Sign In</button></form>
 </div><div class="ver">v{{ version }}</div></div>
@@ -5617,30 +6801,51 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 def api_metrics():
     return jsonify(get_system_metrics())
 
-# === Dashboard Template ===
-DASHBOARD_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAKWERX Console</title>
+@app.route('/api/modules')
+@login_required
+def api_modules():
+    """Live module states for dashboard cards (so CLI uninstall/start/stop is reflected)."""
+    modules = detect_modules()
+    return jsonify({k: {'installed': m.get('installed', False), 'running': m.get('running', False)} for k, m in modules.items()})
+
+# === Console Template (installed services only) ===
+CONSOLE_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Console — infra-TAK</title>
 <style>
 ''' + BASE_CSS + '''
-.modules-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-bottom:32px}
-.module-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;cursor:pointer;transition:all 0.3s;text-decoration:none;display:block;color:inherit}
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
+.modules-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:32px}
+@media(max-width:900px){.modules-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.modules-grid{grid-template-columns:1fr}}
+.module-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px;cursor:pointer;transition:all 0.3s;text-decoration:none;display:block;color:inherit}
 .module-card:hover{border-color:var(--border-hover);background:var(--bg-card-hover);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.3)}
-.module-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.module-icon{font-size:28px}
-.module-status{font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 10px;border-radius:6px;display:flex;align-items:center;gap:6px}
+.module-header{display:flex;align-items:flex-end;gap:10px;margin-bottom:8px}
+.module-header--logo .module-icon{max-height:36px;width:auto;object-fit:contain}
+.module-header .module-icon{flex-shrink:0}
+.module-icon{font-size:22px}
+.module-header .module-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;margin-bottom:0;padding-bottom:2px}
+.module-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;margin-bottom:4px}
+.module-desc{font-size:12px;color:var(--text-dim);line-height:1.35}
+.module-status{font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 8px;border-radius:4px;display:inline-flex;align-items:center;gap:4px;margin-top:8px}
 .status-running{background:rgba(16,185,129,0.1);color:var(--green)}
 .status-stopped{background:rgba(239,68,68,0.1);color:var(--red)}
 .status-not-installed{background:rgba(71,85,105,0.2);color:var(--text-dim)}
-.status-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.status-dot{width:5px;height:5px;border-radius:50%;background:currentColor}
 .status-running .status-dot{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-.module-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:16px;margin-bottom:6px}
-.module-desc{font-size:13px;color:var(--text-dim);line-height:1.4}
-.module-action{display:inline-block;margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent);opacity:0;transition:opacity 0.2s}
+.module-action{display:inline-block;margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);opacity:0;transition:opacity 0.2s}
 .module-card:hover .module-action{opacity:1}
+.meta-line{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:12px}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">Infrastructure Platform</div></div></div><div class="header-right"><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
 {% if not settings.get('fqdn') %}
 <div style="background:linear-gradient(135deg,rgba(234,179,8,0.1),rgba(239,68,68,0.05));border:1px solid rgba(234,179,8,0.3);border-radius:12px;padding:20px 24px;margin-bottom:24px;font-family:'JetBrains Mono',monospace">
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
@@ -5672,25 +6877,44 @@ DASHBOARD_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 <div class="metric-card"><div class="metric-label">Disk</div><div class="metric-value" id="disk-value">{{ metrics.disk_percent }}%</div><div class="metric-detail">{{ metrics.disk_used_gb }}GB / {{ metrics.disk_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
 </div>
-<div class="section-title">Services</div>
+<div class="section-title">Console</div>
 <div class="modules-grid">
-{% for key, mod in modules.items() %}
-<a class="module-card" href="{{ mod.route }}">
-<div class="module-header"><span class="module-icon">{{ mod.icon }}</span>
-{% if mod.installed and mod.running %}<span class="module-status status-running"><span class="status-dot"></span> Running</span>
-{% elif mod.installed %}<span class="module-status status-stopped"><span class="status-dot"></span> Stopped</span>
-{% else %}<span class="module-status status-not-installed">Not Installed</span>{% endif %}
+{% if not modules %}
+<div style="grid-column:1/-1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:48px;text-align:center">
+<div style="font-size:15px;color:var(--text-secondary);margin-bottom:12px">No deployed services yet</div>
+<div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">Install and deploy from the Marketplace to see them here.</div>
+<a href="/marketplace" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;text-decoration:none">Go to Marketplace →</a>
 </div>
-<div class="module-name">{{ mod.name }}</div>
+{% else %}
+{% for key, mod in modules.items() %}
+<a class="module-card" href="{{ mod.route }}" data-module="{{ key }}">
+<div class="module-header{% if mod.get('icon_url') %} module-header--logo{% endif %}">{% if mod.icon_data %}<img src="{{ mod.icon_data }}" alt="" class="module-icon" style="width:24px;height:24px;object-fit:contain">{% elif key == 'takportal' %}<span class="module-icon material-symbols-outlined" style="font-size:28px">group</span>{% elif key == 'emailrelay' %}<span class="module-icon material-symbols-outlined" style="font-size:28px">outgoing_mail</span>{% elif mod.get('icon_url') %}<img src="{{ mod.icon_url }}" alt="" class="module-icon" style="height:36px;width:auto;max-width:{% if key == 'takserver' %}72px{% else %}100px{% endif %};object-fit:contain">{% else %}<span class="module-icon">{{ mod.icon }}</span>{% endif %}
+{% if not mod.get('icon_url') or key == 'takportal' or key == 'emailrelay' %}<div class="module-name">{{ mod.name }}</div>{% endif %}
+</div>
 <div class="module-desc">{{ mod.description }}</div>
+<span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
 {% if mod.installed %}<span class="module-action">Manage →</span>{% else %}<span class="module-action">Deploy →</span>{% endif %}
 </a>
 {% endfor %}
+{% endif %}
 </div>
-</main>
-<footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type', '') }} · {{ settings.get('server_ip', '') }}</footer>
+</div>
 <script>
 setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime}catch(e){}},5000);
+function refreshModuleCards(){
+    fetch('/api/modules').then(r=>r.json()).then(function(mods){
+        for(var k in mods){
+            var el=document.getElementById('module-status-'+k);
+            if(!el)continue;
+            var m=mods[k];
+            var cls='module-status status-'+(m.installed&&m.running?'running':m.installed?'stopped':'not-installed');
+            var label=m.installed&&m.running?'<span class="status-dot"></span> Running':m.installed?'<span class="status-dot"></span> Stopped':'Not Installed';
+            el.className=cls;el.innerHTML=label;
+        }
+    }).catch(function(){});
+}
+setInterval(refreshModuleCards,8000);
+refreshModuleCards();
 var updateBody='';
 async function checkUpdate(){
     try{
@@ -5727,8 +6951,89 @@ async function applyUpdate(){
 checkUpdate();
 </script></body></html>'''
 
+# === Marketplace Template (all services, deploy from here) ===
+MARKETPLACE_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Marketplace — infra-TAK</title>
+<style>
+''' + BASE_CSS + '''
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700}.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px;max-width:1000px;margin:0 auto}
+.modules-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:32px}
+@media(max-width:900px){.modules-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.modules-grid{grid-template-columns:1fr}}
+.module-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px;cursor:pointer;transition:all 0.3s;text-decoration:none;display:block;color:inherit}
+.module-card:hover{border-color:var(--border-hover);background:var(--bg-card-hover);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.3)}
+.module-header{display:flex;align-items:flex-end;gap:10px;margin-bottom:8px}
+.module-header--logo .module-icon{max-height:36px;width:auto;object-fit:contain}
+.module-header .module-icon{flex-shrink:0}
+.module-icon{font-size:22px}
+.module-header .module-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;margin-bottom:0;padding-bottom:2px}
+.module-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:14px;margin-bottom:4px}
+.module-desc{font-size:12px;color:var(--text-dim);line-height:1.35}
+.module-status{font-family:'JetBrains Mono',monospace;font-size:10px;padding:3px 8px;border-radius:4px;display:inline-flex;align-items:center;gap:4px;margin-top:8px}
+.status-running{background:rgba(16,185,129,0.1);color:var(--green)}
+.status-stopped{background:rgba(239,68,68,0.1);color:var(--red)}
+.status-not-installed{background:rgba(71,85,105,0.2);color:var(--text-dim)}
+.status-dot{width:5px;height:5px;border-radius:50%;background:currentColor}
+.status-running .status-dot{animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.module-action{display:inline-block;margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);opacity:0;transition:opacity 0.2s}
+.module-card:hover .module-action{opacity:1}
+.meta-line{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:12px}
+</style></head><body>
+{{ sidebar_html }}
+<div class="main">
+{% if not settings.get('fqdn') %}
+<div style="background:linear-gradient(135deg,rgba(234,179,8,0.1),rgba(239,68,68,0.05));border:1px solid rgba(234,179,8,0.3);border-radius:12px;padding:20px 24px;margin-bottom:24px;font-family:'JetBrains Mono',monospace">
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+<div>
+<div style="font-size:13px;font-weight:600;color:var(--yellow)">🔒 No Domain Configured — Running in IP-Only Mode</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no ATAK QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
+</div>
+<a href="/caddy" style="padding:8px 18px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap">Set Up Domain →</a>
+</div>
+</div>
+{% endif %}
+<div class="metrics-bar" id="metrics-bar">
+<div class="metric-card"><div class="metric-label">CPU</div><div class="metric-value" id="cpu-value">{{ metrics.cpu_percent }}%</div></div>
+<div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value" id="ram-value">{{ metrics.ram_percent }}%</div><div class="metric-detail">{{ metrics.ram_used_gb }}GB / {{ metrics.ram_total_gb }}GB</div></div>
+<div class="metric-card"><div class="metric-label">Disk</div><div class="metric-value" id="disk-value">{{ metrics.disk_percent }}%</div><div class="metric-detail">{{ metrics.disk_used_gb }}GB / {{ metrics.disk_total_gb }}GB</div></div>
+<div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
+</div>
+<div class="section-title">Marketplace</div>
+<div class="modules-grid">
+{% if not modules %}
+<div style="grid-column:1/-1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:48px;text-align:center">
+<div style="font-size:15px;color:var(--text-secondary);margin-bottom:12px">All available services are installed</div>
+<div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">Manage and monitor everything from the Console.</div>
+<a href="/console" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;text-decoration:none">Go to Console →</a>
+</div>
+{% else %}
+{% for key, mod in modules.items() %}
+<a class="module-card" href="{{ mod.route }}" data-module="{{ key }}">
+<div class="module-header{% if mod.get('icon_url') %} module-header--logo{% endif %}">{% if mod.icon_data %}<img src="{{ mod.icon_data }}" alt="" class="module-icon" style="width:24px;height:24px;object-fit:contain">{% elif key == 'takportal' %}<span class="module-icon material-symbols-outlined" style="font-size:28px">group</span>{% elif key == 'emailrelay' %}<span class="module-icon material-symbols-outlined" style="font-size:28px">outgoing_mail</span>{% elif mod.get('icon_url') %}<img src="{{ mod.icon_url }}" alt="" class="module-icon" style="height:36px;width:auto;max-width:{% if key == 'takserver' %}72px{% else %}100px{% endif %};object-fit:contain">{% else %}<span class="module-icon">{{ mod.icon }}</span>{% endif %}
+{% if not mod.get('icon_url') or key == 'takportal' or key == 'emailrelay' %}<div class="module-name">{{ mod.name }}</div>{% endif %}
+</div>
+<div class="module-desc">{{ mod.description }}</div>
+<span class="module-status status-not-installed" id="module-status-{{ key }}" data-module="{{ key }}">Not Installed</span>
+<span class="module-action">Deploy →</span>
+</a>
+{% endfor %}
+{% endif %}
+</div>
+</div>
+<script>
+setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime}catch(e){}},5000);
+</script></body></html>'''
+
 # === TAK Server Template ===
-TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAK Server — TAKWERX Console</title>
+TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>TAK Server</title>
 <style>
 ''' + BASE_CSS + '''
 .upload-area{border:2px dashed var(--border);border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all 0.3s;background:rgba(15,23,42,0.3);margin-bottom:20px}
@@ -5741,33 +7046,62 @@ TAKSERVER_TEMPLATE = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-
 .control-btn:hover{border-color:var(--border-hover);color:var(--text-primary)}
 .control-btn.btn-stop{border-color:rgba(239,68,68,0.3)}.control-btn.btn-stop:hover{background:rgba(239,68,68,0.1);color:var(--red)}
 .control-btn.btn-start{border-color:rgba(16,185,129,0.3)}.control-btn.btn-start:hover{background:rgba(16,185,129,0.1);color:var(--green)}
-.status-banner{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.status-banner{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:12px;padding:24px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
 .status-info{display:flex;align-items:center;gap:16px}
 .status-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .status-icon.running{background:rgba(16,185,129,0.1)}.status-icon.stopped{background:rgba(239,68,68,0.1)}.status-icon.not-installed{background:rgba(71,85,105,0.2)}
 .status-text{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600}
 .status-detail{font-size:13px;color:var(--text-dim);margin-top:4px}
+.status-logo-wrap{display:flex;align-items:center;gap:10px}
+.status-logo{height:36px;width:auto;max-width:100px;object-fit:contain}
+.status-name{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:18px;color:var(--text-primary)}
 .controls{display:flex;gap:10px}
 .cert-downloads{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
 .cert-btn{padding:10px 20px;border-radius:8px;text-decoration:none;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;transition:all 0.2s}
 .cert-btn-primary{background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff}
 .cert-btn-secondary{background:rgba(59,130,246,0.1);color:var(--accent);border:1px solid var(--border)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;display:none;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:28px;width:400px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:8px;color:var(--red)}
+.modal p{font-size:13px;color:var(--text-secondary);margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.form-label{display:block;font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:6px}
+.form-input{width:100%;padding:10px 14px;background:#0a0e1a;border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-size:13px}
+.uninstall-spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:uninstall-spin .7s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes uninstall-spin{to{transform:rotate(360deg)}}
+.uninstall-progress-row{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--text-secondary)}
+body{display:flex;flex-direction:row;min-height:100vh}
+.sidebar{width:220px;min-width:220px;background:var(--bg-surface);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.sidebar-logo span{font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--text-primary)}
+.sidebar-logo small{display:block;font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:2px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 20px;color:var(--text-secondary);text-decoration:none;font-size:13px;font-weight:500;transition:all .15s;border-left:2px solid transparent}
+.nav-item:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.nav-item.active{color:var(--cyan);background:rgba(6,182,212,.06);border-left-color:var(--cyan)}
+.nav-icon{font-size:15px;width:18px;text-align:center}
+.material-symbols-outlined{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;letter-spacing:normal;white-space:nowrap;direction:ltr;-webkit-font-smoothing:antialiased}
+.nav-icon.material-symbols-outlined{font-size:22px;width:22px;text-align:center}
+.page-header{margin-bottom:28px}
+.page-header h1{font-size:22px;font-weight:700}
+.page-header p{color:var(--text-secondary);font-size:13px;margin-top:4px}
+.main{flex:1;min-width:0;overflow-y:auto;padding:32px}
 </style></head><body>
-<div class="top-bar"></div>
-<header class="header"><div class="header-left"><div class="header-icon">⚡</div><div><div class="header-title">TAKWERX Console</div><div class="header-subtitle">TAK Server</div></div></div><div class="header-right"><a href="/" class="btn-back">← Dashboard</a><span class="os-badge">{{ settings.get('os_name', 'Unknown OS') }}</span><a href="/logout" class="btn-logout">Sign Out</a></div></header>
-<main class="main">
+{{ sidebar_html }}
+<div class="main">
+  <div class="page-header"><h1><img src="{{ tak_logo_url }}" alt="" style="height:28px;vertical-align:middle;margin-right:8px;object-fit:contain"> TAK Server</h1><p>Team Awareness Kit server for situational awareness</p></div>
 <div class="status-banner" id="status-banner">
 {% if deploying %}
-<div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🗺️</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
+<div class="status-info"><div class="status-icon running" style="background:rgba(59,130,246,0.1)">🔄</div><div><div class="status-text" style="color:var(--accent)">Deploying...</div><div class="status-detail">TAK Server installation in progress</div></div></div>
 <div class="controls"><button class="control-btn btn-stop" onclick="cancelDeploy()">✗ Cancel</button></div>
 {% elif tak.installed and tak.running %}
-<div class="status-info"><div class="status-icon running">🗺️</div><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
-<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--green)">Running</div><div class="status-detail">TAK Server is active</div></div></div>
+<div class="controls"><button class="control-btn" onclick="takControl('restart')">↻ Restart</button><button class="control-btn btn-stop" onclick="takControl('stop')">■ Stop</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% elif tak.installed %}
-<div class="status-info"><div class="status-icon stopped">🗺️</div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running</div></div></div>
-<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="takUninstall()" style="margin-left:8px">🗑 Remove</button></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">TAK Server is installed but not running</div></div></div>
+<div class="controls"><button class="control-btn btn-start" onclick="takControl('start')">▶ Start</button><button class="control-btn btn-stop" onclick="document.getElementById('tak-uninstall-modal').classList.add('open')" style="margin-left:8px">🗑 Remove</button></div>
 {% else %}
-<div class="status-info"><div class="status-icon not-installed">🗺️</div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
+<div class="status-info"><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Upload package files from tak.gov to deploy</div></div></div>
 {% endif %}
 </div>
 
@@ -5833,8 +7167,22 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 <button onclick="showDeployConfig()" style="padding:12px 32px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;cursor:pointer">Configure &amp; Deploy →</button>
 </div></div></div>
 {% endif %}
-</main>
-<footer class="footer">TAKWERX Console v{{ version }} · {{ settings.get('os_type', '') }} · {{ settings.get('server_ip', '') }}</footer>
+</div>
+<div class="modal-overlay" id="tak-uninstall-modal">
+<div class="modal">
+<h3>⚠ Uninstall TAK Server?</h3>
+<p>This will remove TAK Server completely: /opt/tak, all certificates, and config. You can redeploy after.</p>
+<label class="form-label">Admin Password</label>
+<input class="form-input" id="tak-uninstall-password" type="password" placeholder="Confirm your password">
+<div class="modal-actions">
+<button type="button" class="control-btn" id="tak-uninstall-cancel" onclick="document.getElementById('tak-uninstall-modal').classList.remove('open')">Cancel</button>
+<button type="button" class="control-btn btn-stop" id="tak-uninstall-confirm" onclick="doUninstallTak()">Uninstall</button>
+</div>
+<div id="tak-uninstall-msg" style="margin-top:10px;font-size:12px;color:var(--red)"></div>
+<div id="tak-uninstall-progress" class="uninstall-progress-row" style="display:none;margin-top:10px" aria-live="polite"></div>
+</div>
+</div>
+<footer class="footer"></footer>
 <script>
 async function loadServices(){
     var el=document.getElementById('services-list');
@@ -5937,14 +7285,40 @@ async function takControl(action){
 })();
 
 async function takUninstall(){
-    if(!confirm('Remove TAK Server completely? This will delete /opt/tak, all certificates, and all config. You can redeploy after.'))return;
-    const pw=prompt('Enter admin password to confirm removal:');
-    if(!pw)return;
-    const btns=document.querySelectorAll('.control-btn');
-    btns.forEach(b=>{b.disabled=true;b.style.opacity='0.5'});
-    try{const r=await fetch('/api/takserver/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});const d=await r.json();if(d.success){alert('TAK Server removed. Page will reload.');window.location.href='/takserver'}else{alert('Error: '+(d.error||'Unknown'))}}
-    catch(e){alert('Failed: '+e.message)}
-    btns.forEach(b=>{b.disabled=false;b.style.opacity='1'});
+    document.getElementById('tak-uninstall-modal').classList.add('open');
+}
+async function doUninstallTak(){
+    var pw=document.getElementById('tak-uninstall-password').value;
+    if(!pw){document.getElementById('tak-uninstall-msg').textContent='Please enter your password';return;}
+    var msgEl=document.getElementById('tak-uninstall-msg');
+    var progressEl=document.getElementById('tak-uninstall-progress');
+    var cancelBtn=document.getElementById('tak-uninstall-cancel');
+    var confirmBtn=document.getElementById('tak-uninstall-confirm');
+    msgEl.textContent='';
+    progressEl.style.display='flex';
+    progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Uninstalling…</span>';
+    confirmBtn.disabled=true;
+    cancelBtn.disabled=true;
+    try{
+        var r=await fetch('/api/takserver/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+        var d=await r.json();
+        if(d.success){
+            progressEl.innerHTML='<span class="uninstall-spinner"></span><span>Done. Reloading…</span>';
+            setTimeout(function(){window.location.href='/takserver';},800);
+        }else{
+            msgEl.textContent=d.error||'Uninstall failed';
+            progressEl.style.display='none';
+            progressEl.innerHTML='';
+            confirmBtn.disabled=false;
+            cancelBtn.disabled=false;
+        }
+    }catch(e){
+        msgEl.textContent='Request failed: '+e.message;
+        progressEl.style.display='none';
+        progressEl.innerHTML='';
+        confirmBtn.disabled=false;
+        cancelBtn.disabled=false;
+    }
 }
 
 async function cancelDeploy(){
@@ -6133,7 +7507,7 @@ if __name__ == '__main__':
     ssl_mode = settings.get('ssl_mode', 'self-signed')
     port = settings.get('console_port', 5001)
     print("=" * 50)
-    print("TAKWERX Console v" + VERSION)
+    print("infra-TAK v" + VERSION)
     print("=" * 50)
     print(f"OS: {settings.get('os_name', 'Unknown')}")
     print(f"SSL Mode: {ssl_mode}")
