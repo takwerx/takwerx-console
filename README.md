@@ -1,6 +1,6 @@
 # infra-TAK
 
-Emergency Services Tactical Infrastructure Management Platform.
+Tea Awarness Kit Infrastructure Management Platform.
 
 One clone. One password. One URL. Manage everything from your browser.
 
