@@ -1,4 +1,4 @@
-# TAKWERX TAK-infra
+# infra-TAK
 
 Emergency Services Tactical Infrastructure Management Platform.
 
@@ -18,8 +18,8 @@ No more SSH. No more editing XML by hand. No more running scripts and hoping.
 ## Quick Start
 
 ```bash
-git clone https://github.com/takwerx/tak-infra.git
-cd tak-infra
+git clone https://github.com/takwerx/infra-TAK.git
+cd infra-TAK
 chmod +x start.sh
 sudo ./start.sh
 ```
