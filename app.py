@@ -2954,6 +2954,7 @@ def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
 def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     """Create recovery flow + stages + bindings and link to default authentication flow.
     Matches official Authentik blueprint: Identification -> Email -> Prompt (new pw) -> User Write -> User Login.
+    Non-destructive: only adds missing stages/bindings, never deletes existing ones.
     Returns (success: bool, message: str, recovery_slug: str|None)."""
     import urllib.request as _req
     import urllib.error
@@ -3022,14 +3023,14 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             except Exception:
                 pass
 
-        # 2) Delete ALL existing bindings so we rebuild cleanly (idempotent)
-        bindings = _api_get(f'flows/bindings/?flow__pk={recovery_flow_pk}&ordering=order').get('results', [])
-        for b in bindings:
-            try:
-                r = _req.Request(f'{ak_url}/api/v3/flows/bindings/{b["pk"]}/', headers=ak_headers, method='DELETE')
-                _req.urlopen(r, timeout=15)
-            except Exception:
-                pass
+        # 2) Get existing bindings for recovery flow -- build set of already-bound stage names
+        existing_bindings = _api_get(f'flows/bindings/?flow__pk={recovery_flow_pk}&ordering=order').get('results', [])
+        bound_stage_names = set()
+        for b in existing_bindings:
+            stage_obj = b.get('stage_obj') or {}
+            name = stage_obj.get('name', '')
+            if name.startswith('Recovery '):
+                bound_stage_names.add(name)
 
         # 3) Create all required stages
 
@@ -3101,23 +3102,30 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         # 3f) User Login stage (logs user in after reset)
         user_login_pk = _find_or_create_stage('stages/user_login/', 'Recovery User Login')
 
-        # 4) Bind stages in correct order
-        stage_bindings = [
-            (10, id_stage_pk),
-            (20, email_stage_pk),
-            (30, prompt_stage_pk),
-            (40, user_write_pk),
-            (100, user_login_pk),
+        # 4) Bind only MISSING stages to recovery flow (never delete, only add)
+        desired_bindings = [
+            (10, id_stage_pk, 'Recovery Identification'),
+            (20, email_stage_pk, 'Recovery Email'),
+            (30, prompt_stage_pk, 'Recovery Password Change'),
+            (40, user_write_pk, 'Recovery User Write'),
+            (100, user_login_pk, 'Recovery User Login'),
         ]
-        for order, stage_pk in stage_bindings:
-            if not stage_pk:
+        for order, stage_pk, stage_name in desired_bindings:
+            if not stage_pk or stage_name in bound_stage_names:
                 continue
-            _api_post('flows/bindings/', {
-                'target': recovery_flow_pk, 'stage': stage_pk, 'order': order,
-                'evaluate_on_plan': True, 're_evaluate_policies': order <= 20,
-                'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+            try:
+                _api_post('flows/bindings/', {
+                    'target': recovery_flow_pk, 'stage': stage_pk, 'order': order,
+                    'evaluate_on_plan': True, 're_evaluate_policies': order <= 20,
+                    'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    pass
+                else:
+                    raise
 
         # 5) Link recovery flow to default authentication flow's identification stage
+        #    ONLY patches the recovery_flow field -- never creates/deletes bindings on the auth flow
         auth_flows = _api_get('flows/instances/?designation=authentication').get('results', [])
         auth_flow_pk = next((f['pk'] for f in auth_flows if f.get('slug') == 'default-authentication-flow'),
             auth_flows[0]['pk'] if auth_flows else None)
@@ -3125,9 +3133,16 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             return True, 'Recovery flow created; link to login skipped (no default authentication flow).', recovery_flow_slug
         auth_bindings = _api_get(f'flows/bindings/?flow__pk={auth_flow_pk}').get('results', [])
         for b in auth_bindings:
-            stage = b.get('stage')
-            stage_pk = stage if isinstance(stage, (int, str)) else (stage.get('pk') if isinstance(stage, dict) else None)
+            stage_obj = b.get('stage_obj') or {}
+            stage_pk = stage_obj.get('pk') if isinstance(stage_obj, dict) else None
             if not stage_pk:
+                stage = b.get('stage')
+                stage_pk = stage if isinstance(stage, str) else (stage.get('pk') if isinstance(stage, dict) else None)
+            if not stage_pk:
+                continue
+            # Only touch stages named "default-authentication-identification" (never recovery stages)
+            stage_name = stage_obj.get('name', '') if isinstance(stage_obj, dict) else ''
+            if stage_name and 'identification' not in stage_name.lower():
                 continue
             try:
                 stage_data = _api_get(f'stages/identification/{stage_pk}/')
@@ -3135,16 +3150,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 current_pk = (current_rf if isinstance(current_rf, str) else
                               (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
                 if current_pk != recovery_flow_pk:
-                    try:
-                        _api_patch(f'stages/identification/{stage_pk}/', {'recovery_flow': recovery_flow_pk})
-                    except urllib.error.HTTPError as e:
-                        if e.code == 405:
-                            r = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
-                                data=json.dumps({**stage_data, 'recovery_flow': recovery_flow_pk}).encode(),
-                                headers=ak_headers, method='PUT')
-                            _req.urlopen(r, timeout=15)
-                        else:
-                            raise
+                    _api_patch(f'stages/identification/{stage_pk}/', {'recovery_flow': recovery_flow_pk})
                 break
             except urllib.error.HTTPError as e:
                 if e.code == 404:
