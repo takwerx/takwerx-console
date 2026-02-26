@@ -3114,7 +3114,7 @@ def emailrelay_configure_authentik():
         with open(env_path, 'w') as f:
             f.write('\n'.join(lines) + '\n')
         r = subprocess.run(
-            f'cd {ak_dir} && docker compose up -d',
+            f'cd {ak_dir} && docker compose up -d --force-recreate',
             shell=True, capture_output=True, text=True, timeout=120
         )
         if r.returncode != 0:
@@ -3130,10 +3130,11 @@ def emailrelay_configure_authentik():
                         break
         message = 'Authentik is now configured to use the local Email Relay (localhost:25). Restart complete.'
         if ak_token:
+            import urllib.error as _urllib_err
             ak_url = 'http://127.0.0.1:9090'
             ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
             api_ready = False
-            max_wait = 300  # 5 min cap
+            max_wait = 600  # 10 min cap
             waited = 0
             while waited < max_wait:
                 try:
@@ -3141,6 +3142,12 @@ def emailrelay_configure_authentik():
                     urllib.request.urlopen(req, timeout=5)
                     api_ready = True
                     break
+                except _urllib_err.HTTPError as e:
+                    if e.code in (401, 403):
+                        api_ready = True
+                        break
+                    time.sleep(3)
+                    waited += 3
                 except Exception:
                     time.sleep(3)
                     waited += 3
