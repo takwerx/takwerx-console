@@ -3060,10 +3060,10 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         if pw_stage_pk and pw_stage_pk not in existing_stage_pks:
             stage_pks_to_bind.append((30, pw_stage_pk))
 
-        # 4) Bind stages to recovery flow
+        # 4) Bind stages to recovery flow (API uses 'target' for flow)
         for order, stage_pk in stage_pks_to_bind:
             _req.urlopen(_req.Request(f'{ak_url}/api/v3/flows/bindings/',
-                data=json.dumps({'flow': recovery_flow_pk, 'stage': stage_pk, 'order': order}).encode(),
+                data=json.dumps({'target': recovery_flow_pk, 'stage': stage_pk, 'order': order}).encode(),
                 headers=ak_headers, method='POST'), timeout=15)
 
         # 5) Get default authentication flow and its identification stage, set recovery_flow
