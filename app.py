@@ -5710,19 +5710,11 @@ entries:
             if not api_ready:
                 plog("⚠ API timeout - check Authentik logs")
 
-        # Step 9: Start LDAP outpost
+        # Step 9: LDAP outpost (do NOT start yet — token is still "placeholder")
         plog("")
-        plog("\u2501\u2501\u2501 Step 9/12: Starting LDAP Outpost \u2501\u2501\u2501")
-        r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            plog(f"  \u26a0 LDAP start had issues: {r.stderr.strip()[:200] if r.stderr else r.stdout.strip()[:200]}")
-        plog("  Waiting for LDAP to start...")
-        time.sleep(15)
-        r = subprocess.run('docker logs authentik-ldap-1 2>&1 | tail -3', shell=True, capture_output=True, text=True)
-        if 'Starting LDAP server' in r.stdout or 'Starting authentik outpost' in r.stdout:
-            plog("\u2713 LDAP outpost is running on port 389")
-        else:
-            plog("\u26a0 LDAP outpost may still be starting")
+        plog("\u2501\u2501\u2501 Step 9/12: LDAP Outpost \u2501\u2501\u2501")
+        plog("  LDAP container will be started in Step 11 after the outpost token is injected.")
+        plog("  (Starting LDAP with placeholder token causes 403 and unhealthy status.)")
 
         # Step 10: Patch CoreConfig.xml for LDAP
         plog("")
@@ -6373,6 +6365,10 @@ entries:
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
             plog(f"  ✓ Caddy config updated for Authentik")
         plog("=" * 50)
+        plog("  Next steps:")
+        plog("  1. Open Authentik admin (link below) → Admin interface → Groups → authentik Admins → Users → Add new user, add email, create user.")
+        plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
+        plog("=" * 50)
         plog("  ✓ Deploy complete.")
         authentik_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
@@ -6494,7 +6490,7 @@ body{display:flex;min-height:100vh}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Opens in new tab — keep this page open to copy akadmin password"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Open Authentik admin (new tab){% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Open Authentik admin interface"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
@@ -6560,14 +6556,15 @@ It provides centralized user authentication and management for all your services
   <span style="color:var(--text-dim)">Go to <a href="/caddy" style="color:var(--cyan)">Caddy SSL</a> and configure your domain first.</span>
 </div>
 {% endif %}
-<div class="deploy-log" id="deploy-log" style="display:none">Waiting for deployment to start...</div>
+<div class="deploy-log" id="deploy-log" style="display:none" data-authentik-url="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}">Waiting for deployment to start...</div>
 {% endif %}
 
 {% if deploy_done %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center">
 <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--green);margin-bottom:8px">✓ Authentik deployed!</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">Copy the akadmin password above, then open Authentik in a new tab to log in. This page stays open so you can paste it.</div>
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Open Authentik admin (new tab)</a>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">1. Open Authentik (below) → <strong>Admin interface → Groups</strong> → click <strong>authentik Admins</strong> → <strong>Users</strong> → Add new user, add an email, create user.<br>2. Go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a> and set up SMTP; then use &quot;Configure Authentik to use these settings&quot;.</div>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
+<a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay → SMTP</a>
 <button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
@@ -6647,11 +6644,16 @@ function pollDeployLog(){
             var btn=document.getElementById('deploy-btn');
             if(btn){btn.textContent='\u2713 Deployment Complete';btn.style.background='var(--green)';btn.style.opacity='1';btn.style.cursor='default';}
             var el=document.getElementById('deploy-log');
-            var launchBtn=document.createElement('button');
-            launchBtn.textContent='>> Launch TAK Portal';
-            launchBtn.style.cssText='display:block;width:100%;padding:12px;margin-top:16px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
-            launchBtn.onclick=function(){window.location.href='/takportal';};
-            el.appendChild(launchBtn);
+            var inst=document.createElement('div');
+            inst.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan);margin-top:16px;margin-bottom:8px;text-align:left;line-height:1.6';
+            inst.textContent='Next: Admin interface \u2192 Groups \u2192 authentik Admins \u2192 Users \u2192 Add new user, add email, create user.';
+            el.appendChild(inst);
+            var authUrl=el.getAttribute('data-authentik-url')||'';
+            var launchLink=document.createElement('a');
+            launchLink.href=authUrl;launchLink.target='_blank';launchLink.rel='noopener noreferrer';
+            launchLink.textContent='Launch Authentik Admin';
+            launchLink.style.cssText='display:block;width:100%;padding:12px;margin-top:8px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box';
+            el.appendChild(launchLink);
             var refreshBtn=document.createElement('button');
             refreshBtn.textContent='\u21bb Refresh Authentik Page';
             refreshBtn.style.cssText='display:block;width:100%;padding:10px;margin-top:8px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:13px;cursor:pointer;';
