@@ -5710,11 +5710,12 @@ entries:
             if not api_ready:
                 plog("⚠ API timeout - check Authentik logs")
 
-        # Step 9: LDAP outpost (do NOT start yet — token is still "placeholder")
+        # Step 9: LDAP outpost — do NOT start ldap here; token is still "placeholder" in compose.
+        # Starting LDAP now causes 403 (Token invalid/expired) and container stays unhealthy.
+        # LDAP is started only in Step 11 after we create the outpost via API and inject the real token.
         plog("")
         plog("\u2501\u2501\u2501 Step 9/12: LDAP Outpost \u2501\u2501\u2501")
         plog("  LDAP container will be started in Step 11 after the outpost token is injected.")
-        plog("  (Starting LDAP with placeholder token causes 403 and unhealthy status.)")
 
         # Step 10: Patch CoreConfig.xml for LDAP
         plog("")
@@ -6121,7 +6122,7 @@ entries:
                                             with open(compose_path, 'w') as f:
                                                 f.write(compose_text)
                                             plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
-                                            # Recreate LDAP container so it picks up the new token
+                                            # Only place we start LDAP — never in Step 9 (token would be placeholder → 403/unhealthy).
                                             plog(f"  Recreating LDAP container with new token...")
                                             subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
                                                 shell=True, capture_output=True, timeout=60)
@@ -6137,8 +6138,21 @@ entries:
                                 else:
                                     plog(f"  ✗ No outpost_token_id — cannot inject token")
 
+                                # Ensure LDAP container is always started so it shows on health screen (even if token inject failed)
+                                r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+                                if r.returncode == 0:
+                                    plog(f"  ✓ LDAP container started (if token was not injected, add it in Authentik Outposts and restart LDAP)")
+                                else:
+                                    plog(f"  ⚠ LDAP start: {r.stderr.strip()[:150] if r.stderr else r.stdout.strip()[:150]}")
+
                     except Exception as e:
                         plog(f"  ✗ LDAP setup error: {str(e)[:200]}")
+                        # Still try to start LDAP so container appears on health screen; user can fix token in Authentik
+                        try:
+                            subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, timeout=60)
+                            plog(f"  ℹ LDAP container started (add token in Authentik → Outposts → LDAP, then restart LDAP)")
+                        except Exception:
+                            pass
                 else:
                     if os.path.exists('/opt/tak'):
                         plog("  ⚠ No webadmin password found, skipping user creation")
@@ -6366,7 +6380,8 @@ entries:
             plog(f"  ✓ Caddy config updated for Authentik")
         plog("=" * 50)
         plog("  Next steps:")
-        plog("  1. Open Authentik admin (link below) → Admin interface → Groups → authentik Admins → Users → Add new user, add email, create user.")
+        plog("  1. Launch Authentik Admin (link below), then come back and refresh this page to get the akadmin password.")
+        plog("     After logging in: Admin interface → Groups → authentik Admins → Users → Add new user, add email, create user.")
         plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
         plog("=" * 50)
         plog("  ✓ Deploy complete.")
@@ -6562,7 +6577,7 @@ It provides centralized user authentication and management for all your services
 {% if deploy_done %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center">
 <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--green);margin-bottom:8px">✓ Authentik deployed!</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">1. Open Authentik (below) → <strong>Admin interface → Groups</strong> → click <strong>authentik Admins</strong> → <strong>Users</strong> → Add new user, add an email, create user.<br>2. Go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a> and set up SMTP; then use &quot;Configure Authentik to use these settings&quot;.</div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">1. Click <strong>Authentik</strong> below to open the admin UI, then come back and <strong>refresh this page</strong> to see/copy the akadmin password. After logging in: <strong>Admin interface → Groups</strong> → <strong>authentik Admins</strong> → <strong>Users</strong> → Add new user, add email, create user.<br>2. Go to <a href="/emailrelay" style="color:var(--cyan)">Email Relay</a> and set up SMTP; then use &quot;Configure Authentik to use these settings&quot;.</div>
 <a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Authentik</a>
 <a href="/emailrelay" style="display:inline-block;padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;text-decoration:none;margin-right:10px">Email Relay → SMTP</a>
 <button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
@@ -6646,7 +6661,7 @@ function pollDeployLog(){
             var el=document.getElementById('deploy-log');
             var inst=document.createElement('div');
             inst.style.cssText='font-family:JetBrains Mono,monospace;font-size:12px;color:var(--cyan);margin-top:16px;margin-bottom:8px;text-align:left;line-height:1.6';
-            inst.textContent='Next: Admin interface \u2192 Groups \u2192 authentik Admins \u2192 Users \u2192 Add new user, add email, create user.';
+            inst.textContent='Next: Click \u201cLaunch Authentik Admin\u201d below, then come back here and click \u201cRefresh Authentik Page\u201d to see/copy the akadmin password. After logging in: Admin interface \u2192 Groups \u2192 authentik Admins \u2192 Users \u2192 Add new user, add email, create user.';
             el.appendChild(inst);
             var authUrl=el.getAttribute('data-authentik-url')||'';
             var launchLink=document.createElement('a');
