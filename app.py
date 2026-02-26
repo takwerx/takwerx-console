@@ -5291,11 +5291,15 @@ def authentik_uninstall():
         return jsonify({'error': 'Invalid admin password'}), 403
     ak_dir = os.path.expanduser('~/authentik')
     steps = []
-    subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all 2>/dev/null; true', shell=True, capture_output=True, timeout=180)
-    steps.append('Stopped and removed Docker containers/volumes/images')
     if os.path.exists(ak_dir):
+        r = subprocess.run(f'cd {ak_dir} && docker compose down -v --rmi all --remove-orphans 2>&1', shell=True, capture_output=True, text=True, timeout=180)
+        steps.append('Stopped and removed Docker containers/volumes/images')
+        if r.returncode != 0:
+            steps.append(f'(compose reported: {(r.stderr or r.stdout or "").strip()[:200]})')
         subprocess.run(f'rm -rf {ak_dir}', shell=True, capture_output=True)
         steps.append('Removed ~/authentik')
+    else:
+        steps.append('~/authentik not found (already removed)')
     authentik_deploy_log.clear()
     authentik_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
@@ -5710,12 +5714,20 @@ entries:
             if not api_ready:
                 plog("⚠ API timeout - check Authentik logs")
 
-        # Step 9: LDAP outpost — do NOT start ldap here; token is still "placeholder" in compose.
-        # Starting LDAP now causes 403 (Token invalid/expired) and container stays unhealthy.
-        # LDAP is started only in Step 11 after we create the outpost via API and inject the real token.
+        # Step 9: Start LDAP outpost (placeholder token — Step 11 will inject real token and recreate)
         plog("")
-        plog("\u2501\u2501\u2501 Step 9/12: LDAP Outpost \u2501\u2501\u2501")
-        plog("  LDAP container will be started in Step 11 after the outpost token is injected.")
+        plog("\u2501\u2501\u2501 Step 9/12: Starting LDAP Outpost \u2501\u2501\u2501")
+        r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=120)
+        for line in (r.stdout or '').strip().split('\n'):
+            if line.strip() and 'NEEDRESTART' not in line:
+                authentik_deploy_log.append(f"  {line.strip()}")
+        plog("  Waiting for LDAP to start...")
+        time.sleep(15)
+        r2 = subprocess.run('docker logs authentik-ldap-1 2>&1 | tail -3', shell=True, capture_output=True, text=True)
+        if r2.stdout and ('Starting LDAP server' in r2.stdout or 'Starting authentik outpost' in r2.stdout):
+            plog("\u2713 LDAP outpost is running on port 389")
+        else:
+            plog("\u26a0 LDAP will be recreated with real token in Step 11")
 
         # Step 10: Patch CoreConfig.xml for LDAP
         plog("")
@@ -6122,7 +6134,6 @@ entries:
                                             with open(compose_path, 'w') as f:
                                                 f.write(compose_text)
                                             plog(f"  ✓ LDAP outpost token injected into docker-compose.yml")
-                                            # Only place we start LDAP — never in Step 9 (token would be placeholder → 403/unhealthy).
                                             plog(f"  Recreating LDAP container with new token...")
                                             subprocess.run(f'cd {ak_dir} && docker compose stop ldap && docker compose rm -f ldap && docker compose up -d ldap 2>&1',
                                                 shell=True, capture_output=True, timeout=60)
@@ -6160,6 +6171,20 @@ entries:
                 plog("  ⚠ No bootstrap token found, skipping admin setup")
         except Exception as e:
             plog(f"  ⚠ Admin group setup error (non-fatal): {str(e)[:100]}")
+
+        # Unconditionally ensure LDAP container is up (compose has ldap service from Step 6)
+        compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+        if os.path.exists(compose_path):
+            with open(compose_path) as f:
+                compose_text = f.read()
+            if 'ghcr.io/goauthentik/ldap' in compose_text or '\n  ldap:\n' in compose_text:
+                plog("")
+                plog("  Ensuring LDAP container is running...")
+                r = subprocess.run(f'cd {ak_dir} && docker compose up -d ldap 2>&1', shell=True, capture_output=True, text=True, timeout=90)
+                if r.returncode == 0:
+                    plog("  ✓ LDAP container is up")
+                else:
+                    plog(f"  ✗ LDAP start failed: {(r.stderr or r.stdout or '').strip()[:300]}")
 
         # Step 12: Configure Proxy Provider, Application, Outpost, Brand for TAK Portal
         fqdn = settings.get('fqdn', '')
