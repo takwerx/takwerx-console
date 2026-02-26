@@ -696,6 +696,7 @@ def generate_caddyfile(settings=None):
     lines = [f"# infra-TAK - Auto-generated Caddyfile", f"# Base Domain: {domain}", ""]
 
     ak = modules.get('authentik', {})
+    nodered = modules.get('nodered', {})
     # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
     # /login and / go to app without forward_auth so console password works after pull/restart
     lines.append(f"infratak.{domain} {{")
