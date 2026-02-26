@@ -30,6 +30,59 @@ Nobody has to “go to MediaMTX to add users” or “go to Authentik to add the
 
 ---
 
+## Do not configure MediaMTX email
+
+**Do not configure the email/SMTP portion of MediaMTX.** You don't need it anymore.
+
+The only use for MediaMTX email was: user enters email to request an account → admin approves → SMTP sent them an "you're approved" email. That flow is being replaced by **TAK Portal**:
+
+- **TAK Portal** will offer an **open request-access page** (not behind Authentik) so anyone can reach it and request access.
+- When someone requests access, the admin gets a **notification by email** and a **notification in TAK Portal**.
+- The admin **approves in TAK Portal**; the user is then in LDAP/Authentik and can log in everywhere — including **stream.fqdn** (MediaMTX).
+- No approval email needs to be sent from MediaMTX; TAK Portal and your Email Relay (e.g. infra-TAK's Email Relay + "Configure Authentik") handle recovery and notifications.
+
+So: **skip MediaMTX email config.** Request access, approval, and notifications live in TAK Portal and Email Relay.
+
+---
+
+## LDAP groups that control what users see at stream.fqdn
+
+**Yes — a group controls what they see.** Use **LDAP groups** for both "viewer vs admin" and "which streams a viewer can see."
+
+### Keep stream groups out of TAK / ATAK
+
+**TAK Portal only looks at groups with the `tak_` prefix** (e.g. `tak_CA-COR TEST3`, `tak_ROLE_ADMIN`) for TAK Server, missions, and what shows up in ATAK clients. If you put stream-visibility groups in that same namespace, they would appear in ATAK and users could think they're operational/mission groups.
+
+**Use a separate prefix for stream-only groups** so they never show in TAK Portal or ATAK:
+
+| LDAP group     | Effect at stream.fqdn | Visible in TAK Portal / ATAK? |
+|----------------|----------------------|-------------------------------|
+| **vid_public** | Viewer; which streams = per-path groups in MediaMTX. | **No** — not `tak_*`, so TAK Portal and ATAK ignore them. |
+| **vid_private**| Same as above; different path→group mapping in MediaMTX. | **No** |
+| **vid_admin**  | Full MediaMTX console (admin). | **No** |
+
+So: **`vid_*`** = stream access only. **`tak_*`** = TAK Server / missions / ATAK. Same LDAP, same users; different prefixes keep the two worlds from overlapping.
+
+When MediaMTX is deployed with Authentik present, infra-TAK automatically creates **vid_public**, **vid_private**, and **vid_admin** in Authentik. Assign users to these in a **MediaMTX-only user page** (see below) or in Authentik; they will not appear as TAK groups in ATAK.
+
+For **access to all apps** (Node-RED, infratak, MediaMTX, TAK Portal): use an **Authentik superuser** or **authentik Admins**. You can map **vid_admin** in the stream app to "full console" and keep superuser for "can open every app."
+
+### MediaMTX-only user page (recommended)
+
+To avoid confusion and accidental use of stream groups in TAK:
+
+- **TAK Portal** continues to show and assign only **`tak_*`** groups (for TAK Server, missions, ATAK). The "Create New User" / group list in TAK Portal should only list groups with the `tak_` prefix.
+- **MediaMTX** should have a **separate "Users" or "Stream access" page** that:
+  - Reads **users from LDAP** (same directory as TAK Portal).
+  - Lists users and lets you assign **only** the **`vid_public`**, **`vid_private`**, **`vid_admin`** groups for stream access.
+  - Does **not** show or touch `tak_*` groups — so stream visibility is managed only here, and ATAK never sees these groups.
+
+Same LDAP, same people; **TAK Portal** = TAK/mission groups (`tak_*`), **MediaMTX** = stream groups (`vid_*`). The MediaMTX user page is the right place to assign who can see which streams without affecting TAK Server or what appears in ATAK clients.
+
+This works whether or not TAK Portal is deployed: **With TAK Portal**, you have two UIs (TAK Portal for `tak_*`, MediaMTX for `vid_*`). **With MediaMTX + Authentik only** (no TAK Server, no TAK Portal), the MediaMTX user page is the only place to manage users and stream access — same `vid_*` groups, same LDAP. You don't depend on what TAK Portal does or doesn't show; stream access is always managed in MediaMTX.
+
+---
+
 ## Implementation options
 
 ### Option A: stream.fqdn behind Authentik + LDAP groups
@@ -136,16 +189,16 @@ You want to **go to a stream in the MediaMTX console** (the people who publish /
 
 So the UI change is: **per-path group selector** (checkboxes or toggles) using the existing LDAP group list. Backend: load/save the path->groups mapping and use it for the Active Streams filter and for MediaMTX HTTP (or JWT) auth. Not a rewrite — an extra panel or modal per path and an API to get/set allowed groups for that path.
 
-### Naming convention: keep stream-visibility groups separate from mission groups
+### Naming convention: `vid_*` for stream only, `tak_*` for TAK/ATAK
 
-TAK Server (and TAK Portal) use LDAP groups for **datasync missions** — admins assign groups like "Team Alpha" or "Restricted" to missions. If the **same** group names are used for "who can see this stream" in MediaMTX, an admin could accidentally assign a *stream-visibility* group to a mission (or the other way around).
+TAK Server and TAK Portal use LDAP groups for **datasync missions** and only consider groups with the **`tak_`** prefix (e.g. `tak_CA-COR TEST3`, `tak_ROLE_ADMIN`). Those are what show up in ATAK clients. Stream-visibility groups must **not** use that prefix so they never appear as mission/operational groups in ATAK.
 
-**Recommendation:** Use a **prefix** for groups that are meant for stream/video visibility only, e.g. `video-public`, `media-restricted`, or `stream-viewers`. Then:
+**Recommendation:** Use **`vid_*`** for stream-only groups (`vid_public`, `vid_private`, `vid_admin`). Then:
 
-- In the MediaMTX console, **only show** (or prominently suggest) groups that match a prefix like `video-*` or `media-*` for the "Visible to groups" toggles. Optionally show all groups but label prefixed ones as "Stream visibility" so intent is clear.
-- In TAK Server / TAK Portal, mission-assignable groups stay as they are (no prefix or a different convention). Admins are unlikely to assign `video-public` or `media-restricted` to a datasync mission because the names signal "for video/stream access," not "mission role."
+- In the **MediaMTX console**, **only show** groups that match **`vid_*`** for the "Visible to groups" toggles and for the MediaMTX user/stream-access page. Do not show `tak_*` groups there — they are for TAK, not for streams.
+- In **TAK Portal**, only show **`tak_*`** groups for user/mission assignment. Do not show `vid_*` groups there — they are for streams only and would confuse users if they appeared in ATAK.
 
-So: same LDAP, same directory — just a naming convention so stream-visibility groups are obviously not mission groups. If someone does assign a `video-*` group to a mission, it's a mistake; the prefix makes it less likely and easier to spot.
+Same LDAP, same directory; **`vid_*`** = stream access only (MediaMTX), **`tak_*`** = TAK Server / missions / ATAK (TAK Portal). The prefix keeps the two namespaces separate so stream groups never show in ATAK clients.
 
 ---
 

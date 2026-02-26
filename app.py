@@ -11,7 +11,7 @@ from datetime import datetime
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
-# Share session across infratak.* and console.* when using domain; when using IP (backdoor) use no domain so cookie is sent
+# When using domain (infratak.*) set cookie domain for session; when using IP (backdoor) use no domain so cookie is sent
 def _set_session_cookie_domain():
     try:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.config', 'settings.json')
@@ -321,7 +321,7 @@ def forward_auth():
     settings = load_settings()
     fqdn = (settings.get('fqdn') or '').split(':')[0]
     if fqdn:
-        login_url = f"https://console.{fqdn}/login"
+        login_url = f"https://infratak.{fqdn}/login"
         return redirect(login_url, code=302)
     return '', 401
 
@@ -499,12 +499,10 @@ def _caddy_configured_urls(settings, modules):
         return []
     base = f'https://{fqdn}'
     urls = []
-    # infra-TAK platform (login) and console (dashboard) — behind Authentik when Authentik is installed
+    # infra-TAK (single URL: login + console; behind Authentik when installed)
     ak = modules.get('authentik', {})
-    infratak_desc = 'Login & platform (Authentik when enabled)' if ak.get('installed') else 'Login & platform'
-    console_desc = 'Console (Authentik when enabled)' if ak.get('installed') else 'Console (after login)'
+    infratak_desc = 'Console (Authentik when enabled)' if ak.get('installed') else 'Console (after login)'
     urls.append({'name': 'infra-TAK', 'host': f'infratak.{fqdn}', 'url': f'https://infratak.{fqdn}', 'desc': infratak_desc})
-    urls.append({'name': 'Console', 'host': f'console.{fqdn}', 'url': f'https://console.{fqdn}', 'desc': console_desc})
     tak = modules.get('takserver', {})
     if tak.get('installed'):
         urls.append({'name': 'TAK Server', 'host': f'tak.{fqdn}', 'url': f'https://tak.{fqdn}', 'desc': 'WebGUI, Marti API'})
@@ -687,7 +685,7 @@ def caddy_uninstall():
 
 def generate_caddyfile(settings=None):
     """Generate Caddyfile based on current settings and deployed services.
-    Each service gets its own subdomain: console.domain, tak.domain, etc."""
+    Each service gets its own subdomain: infratak.domain, tak.domain, etc. (console removed — use infratak)."""
     if settings is None:
         settings = load_settings()
     domain = settings.get('fqdn', '')
@@ -701,50 +699,6 @@ def generate_caddyfile(settings=None):
     # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
     # /login and / go to app without forward_auth so console password works after pull/restart
     lines.append(f"infratak.{domain} {{")
-    if ak.get('installed'):
-        lines.append(f"    route /login* {{")
-        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"            transport http {{")
-        lines.append(f"                tls")
-        lines.append(f"                tls_insecure_skip_verify")
-        lines.append(f"            }}")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
-        lines.append(f"    route / {{")
-        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"            transport http {{")
-        lines.append(f"                tls")
-        lines.append(f"                tls_insecure_skip_verify")
-        lines.append(f"            }}")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
-        lines.append(f"    route {{")
-        lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
-        lines.append(f"        forward_auth 127.0.0.1:9090 {{")
-        lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
-        lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
-        lines.append(f"            trusted_proxies private_ranges")
-        lines.append(f"        }}")
-        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"            transport http {{")
-        lines.append(f"                tls")
-        lines.append(f"                tls_insecure_skip_verify")
-        lines.append(f"            }}")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
-    else:
-        lines.append(f"    reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"        transport http {{")
-        lines.append(f"            tls")
-        lines.append(f"            tls_insecure_skip_verify")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
-    lines.append(f"}}")
-    lines.append("")
-
-    # Console — console.domain (behind Authentik when installed; /login and / bypass so console password works after pull)
-    nodered = modules.get('nodered', {})
-    lines.append(f"console.{domain} {{")
     if ak.get('installed'):
         lines.append(f"    route /login* {{")
         lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
@@ -888,13 +842,24 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — stream.domain is web editor only. For drone/controller/ATAK push to 8554/8890.
+    # MediaMTX — stream.domain (behind Authentik when installed). Web editor only; drone/controller/ATAK push to 8554/8890.
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
         mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
         lines.append(f"# MediaMTX Web Console")
         lines.append(f"{mtx_domain} {{")
-        lines.append(f"    reverse_proxy 127.0.0.1:5080")
+        if ak.get('installed'):
+            lines.append(f"    route {{")
+            lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
+            lines.append(f"        forward_auth 127.0.0.1:9090 {{")
+            lines.append(f"            uri /outpost.goauthentik.io/auth/caddy")
+            lines.append(f"            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid")
+            lines.append(f"            trusted_proxies private_ranges")
+            lines.append(f"        }}")
+            lines.append(f"        reverse_proxy 127.0.0.1:5080")
+            lines.append(f"    }}")
+        else:
+            lines.append(f"    reverse_proxy 127.0.0.1:5080")
         lines.append(f"}}")
         lines.append("")
 
@@ -2184,6 +2149,39 @@ WantedBy=multi-user.target
         time.sleep(3)
         r = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
         if r.stdout.strip() == 'active':
+            # If Authentik is running, ensure stream visibility groups exist (video-public, video-private, video-admin)
+            ak_dir = os.path.expanduser('~/authentik')
+            env_path = os.path.join(ak_dir, '.env')
+            if os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')) and os.path.exists(env_path):
+                ak_token = ''
+                with open(env_path) as f:
+                    for line in f:
+                        if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                            ak_token = line.strip().split('=', 1)[1].strip()
+                            break
+                if ak_token:
+                    import urllib.request
+                    import urllib.error
+                    plog("")
+                    plog("━━━ Creating Authentik groups for stream access ━━━")
+                    ak_url = 'http://127.0.0.1:9090'
+                    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+                    for group_name in ('vid_public', 'vid_private', 'vid_admin'):
+                        try:
+                            req = urllib.request.Request(f'{ak_url}/api/v3/core/groups/',
+                                data=json.dumps({'name': group_name, 'is_superuser': False}).encode(),
+                                headers=ak_headers, method='POST')
+                            urllib.request.urlopen(req, timeout=10)
+                            plog(f"  ✓ Created group: {group_name}")
+                        except urllib.error.HTTPError as e:
+                            if e.code == 400:
+                                plog(f"  ✓ Group already exists: {group_name}")
+                            else:
+                                plog(f"  ⚠ Could not create {group_name}: {e.code}")
+                        except Exception as ex:
+                            plog(f"  ⚠ Could not create {group_name}: {str(ex)[:60]}")
+                    plog("  Assign users to vid_* groups in MediaMTX stream-access page or Authentik (they do not show in TAK/ATAK).")
+
             plog("")
             plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             plog(f"🎉 MediaMTX v{version} deployed successfully!")
@@ -2929,6 +2927,233 @@ def emailrelay_uninstall():
     return jsonify({'success': True, 'steps': ['Postfix stopped and removed', 'Configuration cleared']})
 
 
+def _ensure_authentik_recovery_flow(ak_url, ak_headers):
+    """Create recovery flow + stages + bindings and link to default authentication flow.
+    Returns (success: bool, message: str)."""
+    import urllib.request as _req
+    import urllib.error
+    try:
+        # 1) Get or create recovery flow
+        req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=recovery', headers=ak_headers)
+        resp = _req.urlopen(req, timeout=15)
+        recovery_flows = json.loads(resp.read().decode()).get('results', [])
+        recovery_flow_pk = next((f['pk'] for f in recovery_flows if f.get('slug') == 'default-password-recovery'), None)
+        if not recovery_flow_pk and recovery_flows:
+            recovery_flow_pk = recovery_flows[0]['pk']
+        if not recovery_flow_pk:
+            req = _req.Request(f'{ak_url}/api/v3/flows/instances/',
+                data=json.dumps({'name': 'Password Recovery', 'slug': 'default-password-recovery',
+                    'designation': 'recovery', 'title': 'Recover password'}).encode(),
+                headers=ak_headers, method='POST')
+            resp = _req.urlopen(req, timeout=15)
+            recovery_flow_pk = json.loads(resp.read().decode())['pk']
+
+        # 2) Get existing bindings for recovery flow
+        req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={recovery_flow_pk}', headers=ak_headers)
+        resp = _req.urlopen(req, timeout=15)
+        bindings = json.loads(resp.read().decode()).get('results', [])
+        existing_stage_pks = set()
+        for b in bindings:
+            s = b.get('stage')
+            if isinstance(s, (int, str)):
+                existing_stage_pks.add(s)
+            elif isinstance(s, dict) and 'pk' in s:
+                existing_stage_pks.add(s['pk'])
+
+        # 3) Create stages if not already bound
+        def create_stage(path, body):
+            r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
+            resp = _req.urlopen(r, timeout=15)
+            return json.loads(resp.read().decode())['pk']
+
+        stage_pks_to_bind = []
+        # Identification (recovery: identify by email)
+        req = _req.Request(f'{ak_url}/api/v3/stages/identification/?search=Recovery+Identification', headers=ak_headers)
+        try:
+            resp = _req.urlopen(req, timeout=15)
+            results = json.loads(resp.read().decode()).get('results', [])
+            id_stage_pk = results[0]['pk'] if results else None
+        except Exception:
+            id_stage_pk = None
+        if not id_stage_pk:
+            try:
+                id_stage_pk = create_stage('stages/identification/', {'name': 'Recovery Identification', 'user_fields': ['email']})
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    req = _req.Request(f'{ak_url}/api/v3/stages/identification/', headers=ak_headers)
+                    resp = _req.urlopen(req, timeout=15)
+                    results = json.loads(resp.read().decode()).get('results', [])
+                    id_stage_pk = results[0]['pk'] if results else None
+                else:
+                    raise
+        if id_stage_pk and id_stage_pk not in existing_stage_pks:
+            stage_pks_to_bind.append((10, id_stage_pk))
+
+        # Email stage (sends recovery link)
+        req = _req.Request(f'{ak_url}/api/v3/stages/email/?search=Recovery+Email', headers=ak_headers)
+        try:
+            resp = _req.urlopen(req, timeout=15)
+            results = json.loads(resp.read().decode()).get('results', [])
+            email_stage_pk = results[0]['pk'] if results else None
+        except Exception:
+            email_stage_pk = None
+        if not email_stage_pk:
+            try:
+                email_stage_pk = create_stage('stages/email/', {'name': 'Recovery Email'})
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    req = _req.Request(f'{ak_url}/api/v3/stages/email/', headers=ak_headers)
+                    resp = _req.urlopen(req, timeout=15)
+                    results = json.loads(resp.read().decode()).get('results', [])
+                    email_stage_pk = results[0]['pk'] if results else None
+                else:
+                    raise
+        if email_stage_pk and email_stage_pk not in existing_stage_pks:
+            stage_pks_to_bind.append((20, email_stage_pk))
+
+        # Password stage (set new password)
+        req = _req.Request(f'{ak_url}/api/v3/stages/password/?search=Recovery+Password', headers=ak_headers)
+        try:
+            resp = _req.urlopen(req, timeout=15)
+            results = json.loads(resp.read().decode()).get('results', [])
+            pw_stage_pk = results[0]['pk'] if results else None
+        except Exception:
+            pw_stage_pk = None
+        if not pw_stage_pk:
+            try:
+                pw_stage_pk = create_stage('stages/password/', {'name': 'Recovery Password'})
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    req = _req.Request(f'{ak_url}/api/v3/stages/password/', headers=ak_headers)
+                    resp = _req.urlopen(req, timeout=15)
+                    results = json.loads(resp.read().decode()).get('results', [])
+                    pw_stage_pk = results[0]['pk'] if results else None
+                else:
+                    raise
+        if pw_stage_pk and pw_stage_pk not in existing_stage_pks:
+            stage_pks_to_bind.append((30, pw_stage_pk))
+
+        # 4) Bind stages to recovery flow
+        for order, stage_pk in stage_pks_to_bind:
+            _req.urlopen(_req.Request(f'{ak_url}/api/v3/flows/bindings/',
+                data=json.dumps({'flow': recovery_flow_pk, 'stage': stage_pk, 'order': order}).encode(),
+                headers=ak_headers, method='POST'), timeout=15)
+
+        # 5) Get default authentication flow and its identification stage, set recovery_flow
+        req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=authentication', headers=ak_headers)
+        resp = _req.urlopen(req, timeout=15)
+        auth_flows = json.loads(resp.read().decode()).get('results', [])
+        auth_flow_pk = next((f['pk'] for f in auth_flows if f.get('slug') == 'default-authentication-flow'),
+            auth_flows[0]['pk'] if auth_flows else None)
+        if not auth_flow_pk:
+            return True, 'Recovery flow created; link to login skipped (no default authentication flow).'
+        req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={auth_flow_pk}', headers=ak_headers)
+        resp = _req.urlopen(req, timeout=15)
+        auth_bindings = json.loads(resp.read().decode()).get('results', [])
+        for b in auth_bindings:
+            stage = b.get('stage')
+            stage_pk = stage if isinstance(stage, (int, str)) else (stage.get('pk') if isinstance(stage, dict) else None)
+            if not stage_pk:
+                continue
+            req = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/', headers=ak_headers)
+            try:
+                resp = _req.urlopen(req, timeout=15)
+                stage_data = json.loads(resp.read().decode())
+                if stage_data.get('recovery_flow') != recovery_flow_pk:
+                    _req.urlopen(_req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                        data=json.dumps({**stage_data, 'recovery_flow': recovery_flow_pk}).encode(),
+                        headers=ak_headers, method='PUT'), timeout=15)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue
+                raise
+        return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.'
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route('/api/emailrelay/configure-authentik', methods=['POST'])
+@login_required
+def emailrelay_configure_authentik():
+    """Push Email Relay settings into Authentik and set up recovery flow (SMTP + Forgot password?)."""
+    settings = load_settings()
+    relay = settings.get('email_relay') or {}
+    if not relay.get('from_addr'):
+        return jsonify({'success': False, 'error': 'Email Relay not configured. Deploy the relay first.'}), 400
+    ak_dir = os.path.expanduser('~/authentik')
+    env_path = os.path.join(ak_dir, '.env')
+    if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+        return jsonify({'success': False, 'error': 'Authentik is not installed.'}), 400
+    from_addr = (relay.get('from_addr') or '').strip() or 'authentik@localhost'
+    # Authentik email env vars (docs: https://docs.goauthentik.io/install-config/email/)
+    email_block = [
+        '',
+        '# Email — use local relay (Postfix)',
+        'AUTHENTIK_EMAIL__HOST=localhost',
+        'AUTHENTIK_EMAIL__PORT=25',
+        'AUTHENTIK_EMAIL__USERNAME=',
+        'AUTHENTIK_EMAIL__PASSWORD=',
+        'AUTHENTIK_EMAIL__USE_TLS=false',
+        'AUTHENTIK_EMAIL__USE_SSL=false',
+        'AUTHENTIK_EMAIL__TIMEOUT=10',
+        f'AUTHENTIK_EMAIL__FROM={from_addr}',
+    ]
+    try:
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_EMAIL__'):
+                        continue
+                    lines.append(line.rstrip('\n'))
+        if lines and lines[-1].strip() != '':
+            lines.append('')
+        lines.extend(email_block)
+        with open(env_path, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+        r = subprocess.run(
+            f'cd {ak_dir} && docker compose up -d',
+            shell=True, capture_output=True, text=True, timeout=120
+        )
+        if r.returncode != 0:
+            return jsonify({'success': False, 'error': f'Authentik restart failed: {r.stderr or r.stdout}'}), 500
+
+        # Wait for API then set up recovery flow
+        ak_token = ''
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                        ak_token = line.strip().split('=', 1)[1].strip()
+                        break
+        message = 'Authentik is now configured to use the local Email Relay (localhost:25). Restart complete.'
+        if ak_token:
+            ak_url = 'http://127.0.0.1:9090'
+            ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+            api_ready = False
+            for _ in range(18):
+                try:
+                    req = urllib.request.Request(f'{ak_url}/api/v3/core/users/', headers=ak_headers)
+                    urllib.request.urlopen(req, timeout=5)
+                    api_ready = True
+                    break
+                except Exception:
+                    time.sleep(5)
+            if api_ready:
+                ok, recovery_msg = _ensure_authentik_recovery_flow(ak_url, ak_headers)
+                if ok:
+                    message = 'Authentik is configured to use the local Email Relay. ' + recovery_msg
+                else:
+                    message += f' Recovery flow could not be created: {recovery_msg}. You can set it up manually in Authentik.'
+            else:
+                message += ' Recovery flow was not set up (API not ready in time). You can run "Configure Authentik" again or set up recovery manually in Authentik.'
+
+        return jsonify({'success': True, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ── Node-RED ──────────────────────────────────────────────────────────────────
 nodered_deploy_log = []
 nodered_deploy_status = {'running': False, 'complete': False, 'error': False, 'cancelled': False}
@@ -3166,11 +3391,20 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
             log("  ⚠ No authorization/invalidation flow — skipping infra-TAK Console proxy providers")
             return False
 
+        entries = [('infra-TAK', 'infratak', f'https://infratak.{fqdn}')]
+        try:
+            s = load_settings()
+            mtx_domain = s.get('mediamtx_domain', f'stream.{fqdn}')
+            if '.' not in mtx_domain:
+                mtx_domain = f'{mtx_domain}.{fqdn}'
+            mtx_installed = (os.path.exists(os.path.expanduser('~/mediamtx-webeditor/mediamtx_config_editor.py')) or
+                detect_modules().get('mediamtx', {}).get('installed'))
+            if mtx_installed:
+                entries.append(('MediaMTX', 'stream', f'https://{mtx_domain}'))
+        except Exception:
+            pass
         provider_pks = []
-        for name, slug, host in [
-            ('infra-TAK (infratak)', 'infratak-console', f'https://infratak.{fqdn}'),
-            ('infra-TAK (console)', 'console-console', f'https://console.{fqdn}'),
-        ]:
+        for name, slug, host in entries:
             pk = None
             try:
                 req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/',
@@ -3185,7 +3419,7 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                 log(f"  ✓ Proxy provider created: {name}")
             except Exception as e:
                 if hasattr(e, 'code') and e.code == 400:
-                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={slug.split("-")[0]}', headers=_ak_headers)
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={slug}', headers=_ak_headers)
                     resp = _urlreq.urlopen(req, timeout=10)
                     results = json.loads(resp.read().decode())['results']
                     if results:
@@ -3197,7 +3431,7 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
             if pk:
                 try:
                     req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
-                        data=json.dumps({'name': 'infra-TAK Console', 'slug': slug, 'provider': pk}).encode(),
+                        data=json.dumps({'name': name, 'slug': slug, 'provider': pk}).encode(),
                         headers=_ak_headers, method='POST')
                     _urlreq.urlopen(req, timeout=10)
                     log(f"  ✓ Application created: {name}")
@@ -4182,6 +4416,15 @@ Configure TAK Portal and MediaMTX to use the local relay:<br><br>
 <strong>TLS:</strong> <code>off</code>
 </div>
 
+{% if modules.get('authentik', {}).get('installed') %}
+<div class="section-title">Configure Authentik</div>
+<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
+<p style="margin:0 0 16px 0;color:var(--text-muted)">Push this relay (localhost:25) and your From address into Authentik so recovery emails and other Authentik mail use the same relay.</p>
+<button onclick="configureAuthentik()" id="cfg-ak-btn" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;cursor:pointer">Configure Authentik to use these settings</button>
+<div id="cfg-ak-result" style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;display:none"></div>
+</div>
+{% endif %}
+
 <div class="section-title">Send Test Email</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
 <div style="display:flex;gap:12px;align-items:end">
@@ -4325,6 +4568,18 @@ async function sendTest(){
     var d=await r.json();
     if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.output}
     else{res.style.color='var(--red)';res.textContent='✗ '+d.error}
+}
+
+async function configureAuthentik(){
+    var btn=document.getElementById('cfg-ak-btn');
+    var res=document.getElementById('cfg-ak-result');
+    if(!btn||!res) return;
+    btn.disabled=true;res.style.display='block';res.style.color='var(--text-dim)';res.textContent='Configuring...';
+    var r=await fetch('/api/emailrelay/configure-authentik',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var d=await r.json();
+    if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.message}
+    else{res.style.color='var(--red)';res.textContent='✗ '+(d.error||'Failed')}
+    btn.disabled=false;
 }
 
 async function emailControl(action){
@@ -6041,28 +6296,24 @@ entries:
                                         break
                             if embedded:
                                 outpost_pk = embedded['pk']
-                                # Get current providers list and add ours
-                                current_providers = embedded.get('providers', [])
+                                current_providers = list(embedded.get('providers', []))
                                 if provider_pk not in current_providers:
                                     current_providers.append(provider_pk)
-                                # First update providers
+                                existing_config = dict(embedded.get('config', {}))
+                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
+                                existing_config['authentik_host_insecure'] = False
+                                # Single PUT: providers + config (PATCH with only config can 400)
+                                put_payload = {
+                                    'name': embedded.get('name', 'authentik Embedded Outpost'),
+                                    'type': embedded.get('type', 'proxy'),
+                                    'providers': current_providers,
+                                    'config': existing_config,
+                                }
                                 req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{outpost_pk}/',
-                                    data=json.dumps({
-                                        'name': embedded['name'],
-                                        'type': embedded.get('type', 'proxy'),
-                                        'providers': current_providers,
-                                    }).encode(),
+                                    data=json.dumps(put_payload).encode(),
                                     headers=ak_headers, method='PUT')
                                 urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ TAK Portal added to embedded outpost")
-                                # Then patch config separately
-                                existing_config = embedded.get('config', {})
-                                existing_config['authentik_host'] = f'https://authentik.{fqdn}'
-                                existing_config['authentik_host_insecure'] = False
-                                req = urllib.request.Request(f'{ak_url}/api/v3/outposts/instances/{outpost_pk}/',
-                                    data=json.dumps({'config': existing_config}).encode(),
-                                    headers=ak_headers, method='PATCH')
-                                urllib.request.urlopen(req, timeout=15)
                                 plog(f"  ✓ Embedded outpost authentik_host set to https://authentik.{fqdn}")
                             else:
                                 plog("  ⚠ No embedded outpost found — create one in Authentik admin")
@@ -6121,6 +6372,7 @@ entries:
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
             plog(f"  ✓ Caddy config updated for Authentik")
         plog("=" * 50)
+        plog("  ✓ Deploy complete.")
         authentik_deploy_status.update({'running': False, 'complete': True})
     except Exception as e:
         plog(f"\u2717 FATAL ERROR: {str(e)}")
@@ -6240,8 +6492,8 @@ body{display:flex;min-height:100vh}
 {% elif ak.installed and ak.running %}
 <div class="section-title">Access</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<div style="display:flex;gap:10px;flex-wrap:nowrap;align-items:center">
-<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Authentik{% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" class="cert-btn cert-btn-primary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px;display:inline-flex;align-items:center;gap:6px" title="Opens in new tab — keep this page open to copy akadmin password"><img src="{{ authentik_logo_url }}" alt="" style="width:18px;height:18px;object-fit:contain">Open Authentik admin (new tab){% if not settings.get('fqdn') %} :{{ ak_port }}{% endif %}</a>
 <a href="{{ 'https://takportal.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':3000' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">👥 TAK Portal{% if not settings.get('fqdn') %} :3000{% endif %}</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8443' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔐 WebGUI :8443 (cert)</a>
 <a href="{{ 'https://tak.' + settings.get('fqdn') if settings.get('fqdn') else 'https://' + settings.get('server_ip', '') + ':8446' }}" target="_blank" class="cert-btn cert-btn-secondary" style="text-decoration:none;white-space:nowrap;font-size:12px;padding:8px 14px">🔑 WebGUI :8446 (password)</a>
@@ -6313,8 +6565,9 @@ It provides centralized user authentication and management for all your services
 {% if deploy_done %}
 <div style="background:rgba(16,185,129,0.1);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:20px;text-align:center">
 <div style="font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--green);margin-bottom:8px">✓ Authentik deployed!</div>
-<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">Navigate to Initial Setup to set your akadmin password.</div>
-<button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
+<div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan);margin-bottom:12px">Copy the akadmin password above, then open Authentik in a new tab to log in. This page stays open so you can paste it.</div>
+<a href="{{ 'https://authentik.' + settings.get('fqdn', '') if settings.get('fqdn') else 'http://' + settings.get('server_ip', '') + ':' + str(ak_port) }}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;margin-right:10px">Open Authentik admin (new tab)</a>
+<button onclick="window.location.href='/authentik'" style="padding:10px 24px;background:rgba(30,64,175,0.2);color:var(--cyan);border:1px solid var(--border);border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Refresh Page</button>
 </div>
 {% endif %}
 </div>

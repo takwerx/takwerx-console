@@ -138,7 +138,7 @@ start.sh                    ← One CLI command to launch everything
 
 ## Design notes
 
-- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management).
+- **[MediaMTX access driven by TAK Portal / LDAP](docs/MEDIAMTX-TAKPORTAL-ACCESS.md)** — How stream.fqdn admin vs viewer logic can be driven from TAK Portal (one place to manage users, no separate MediaMTX or Authentik user management). **Do not configure the email/SMTP portion of MediaMTX** — request access and approval notifications are handled by TAK Portal’s open request-access page and Email Relay.
 
 ---
 
@@ -147,7 +147,7 @@ start.sh                    ← One CLI command to launch everything
 ### v0.1.7-alpha — 2026-02-24
 
 **Node-RED Authentik Integration**
-Node-RED is now protected behind Authentik forward auth at `console.{fqdn}/nodered/`. Requires Authentik login — same flow as TAK Portal.
+Node-RED is now protected behind Authentik forward auth at `nodered.{fqdn}`. Requires Authentik login — same flow as TAK Portal.
 
 **Bug Fix: Node-RED proxy provider was never created**
 The provider creation payload used `authentication_flow` instead of `authorization_flow` (typo). Every POST returned 400 validation error, not "duplicate" — so the provider was never created. Also added the missing `invalidation_flow` field.
