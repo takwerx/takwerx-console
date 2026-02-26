@@ -2950,7 +2950,7 @@ def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90):
 
 def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     """Create recovery flow + stages + bindings and link to default authentication flow.
-    Returns (success: bool, message: str)."""
+    Returns (success: bool, message: str, recovery_slug: str|None)."""
     import urllib.request as _req
     import urllib.error
     def _err(e):
@@ -2964,9 +2964,15 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         req = _req.Request(f'{ak_url}/api/v3/flows/instances/?designation=recovery', headers=ak_headers)
         resp = _req.urlopen(req, timeout=15)
         recovery_flows = json.loads(resp.read().decode()).get('results', [])
-        recovery_flow_pk = next((f['pk'] for f in recovery_flows if f.get('slug') == 'default-password-recovery'), None)
+        recovery_flow_pk = None
+        recovery_flow_slug = 'default-password-recovery'
+        for f in recovery_flows:
+            if f.get('slug') == 'default-password-recovery':
+                recovery_flow_pk = f['pk']
+                break
         if not recovery_flow_pk and recovery_flows:
             recovery_flow_pk = recovery_flows[0]['pk']
+            recovery_flow_slug = recovery_flows[0].get('slug', recovery_flow_slug)
         if not recovery_flow_pk:
             req = _req.Request(f'{ak_url}/api/v3/flows/instances/',
                 data=json.dumps({'name': 'Password Recovery', 'slug': 'default-password-recovery',
@@ -2974,6 +2980,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 headers=ak_headers, method='POST')
             resp = _req.urlopen(req, timeout=15)
             recovery_flow_pk = json.loads(resp.read().decode())['pk']
+            recovery_flow_slug = 'default-password-recovery'
 
         # 2) Get existing bindings for recovery flow
         req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={recovery_flow_pk}', headers=ak_headers)
@@ -3073,7 +3080,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         auth_flow_pk = next((f['pk'] for f in auth_flows if f.get('slug') == 'default-authentication-flow'),
             auth_flows[0]['pk'] if auth_flows else None)
         if not auth_flow_pk:
-            return True, 'Recovery flow created; link to login skipped (no default authentication flow).'
+            return True, 'Recovery flow created; link to login skipped (no default authentication flow).', recovery_flow_slug
         req = _req.Request(f'{ak_url}/api/v3/flows/bindings/?flow__pk={auth_flow_pk}', headers=ak_headers)
         resp = _req.urlopen(req, timeout=15)
         auth_bindings = json.loads(resp.read().decode()).get('results', [])
@@ -3095,11 +3102,11 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 if e.code == 404:
                     continue
                 raise
-        return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.'
+        return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.', recovery_flow_slug
     except urllib.error.HTTPError as e:
-        return False, _err(e)
+        return False, _err(e), None
     except Exception as e:
-        return False, str(e)
+        return False, str(e), None
 
 
 @app.route('/api/emailrelay/configure-authentik', methods=['POST'])
@@ -3162,9 +3169,13 @@ def emailrelay_configure_authentik():
             ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
             api_ready = _wait_for_authentik_api(ak_url, ak_headers, max_attempts=120)
             if api_ready:
-                ok, recovery_msg = _ensure_authentik_recovery_flow(ak_url, ak_headers)
+                ok, recovery_msg, recovery_slug = _ensure_authentik_recovery_flow(ak_url, ak_headers)
                 if ok:
                     message = 'Authentik is configured to use the local Email Relay. ' + recovery_msg
+                    if recovery_slug:
+                        fqdn = settings.get('fqdn', '').strip()
+                        base = f'https://authentik.{fqdn}' if fqdn else 'https://<your-authentik-host>'
+                        message += f' Direct recovery URL: {base}/if/flow/{recovery_slug}/.'
                 else:
                     message += f' Recovery flow could not be created: {recovery_msg}. You can set it up manually in Authentik.'
             else:
