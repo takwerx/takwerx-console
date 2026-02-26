@@ -3251,52 +3251,37 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 else:
                     raise
 
-        # 5) Link recovery flow to default authentication flow's identification stage
-        #    ONLY patches the recovery_flow field -- never creates/deletes bindings on the auth flow
-        auth_flows = _api_get('flows/instances/?designation=authentication').get('results', [])
-        auth_flow_pk = next((f['pk'] for f in auth_flows if f.get('slug') == 'default-authentication-flow'),
-            auth_flows[0]['pk'] if auth_flows else None)
-        if not auth_flow_pk:
-            return True, 'Recovery flow created; link to login skipped (no default authentication flow).', recovery_flow_slug
-        auth_bindings = _api_get(f'flows/bindings/?flow__pk={auth_flow_pk}').get('results', [])
-        for b in auth_bindings:
-            stage_obj = b.get('stage_obj') or {}
-            stage_pk = stage_obj.get('pk') if isinstance(stage_obj, dict) else None
-            if not stage_pk:
-                stage = b.get('stage')
-                stage_pk = stage if isinstance(stage, str) else (stage.get('pk') if isinstance(stage, dict) else None)
-            if not stage_pk:
-                continue
-            # Only touch stages named "default-authentication-identification" (never recovery stages)
-            stage_name = stage_obj.get('name', '') if isinstance(stage_obj, dict) else ''
-            if stage_name and 'identification' not in stage_name.lower():
-                continue
+        # 5) Link recovery flow to the default-authentication-identification stage
+        #    Find it directly by name -- don't iterate bindings (avoids hitting wrong stage)
+        auth_id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
+        if not auth_id_stage_pk:
+            all_id = _api_get('stages/identification/').get('results', [])
+            for s in all_id:
+                if 'default' in s.get('name', '').lower() and 'authentication' in s.get('name', '').lower():
+                    auth_id_stage_pk = s['pk']
+                    break
+        if auth_id_stage_pk:
             try:
-                stage_data = _api_get(f'stages/identification/{stage_pk}/')
+                stage_data = _api_get(f'stages/identification/{auth_id_stage_pk}/')
                 current_rf = stage_data.get('recovery_flow')
                 current_pk = (current_rf if isinstance(current_rf, str) else
                               (current_rf.get('pk') if isinstance(current_rf, dict) and current_rf else None))
                 if current_pk != recovery_flow_pk:
-                    # Include user_fields in PATCH -- Authentik validates the full model
                     patch_body = {'recovery_flow': recovery_flow_pk}
                     uf = stage_data.get('user_fields')
                     if uf:
                         patch_body['user_fields'] = uf
                     try:
-                        _api_patch(f'stages/identification/{stage_pk}/', patch_body)
+                        _api_patch(f'stages/identification/{auth_id_stage_pk}/', patch_body)
                     except urllib.error.HTTPError:
-                        # Full PUT as fallback with all existing data
                         put_body = {k: v for k, v in stage_data.items()
                                     if k not in ('pk', 'component', 'verbose_name', 'verbose_name_plural', 'meta_model_name', 'flow_set')}
                         put_body['recovery_flow'] = recovery_flow_pk
-                        r = _req.Request(f'{ak_url}/api/v3/stages/identification/{stage_pk}/',
+                        r = _req.Request(f'{ak_url}/api/v3/stages/identification/{auth_id_stage_pk}/',
                             data=json.dumps(put_body).encode(), headers=ak_headers, method='PUT')
                         _req.urlopen(r, timeout=15)
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    continue
-                raise
+            except urllib.error.HTTPError:
+                pass
         return True, 'Recovery flow created and linked; "Forgot password?" is on the login page.', recovery_flow_slug
     except urllib.error.HTTPError as e:
         return False, _err(e), None
