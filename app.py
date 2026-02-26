@@ -3141,20 +3141,29 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             except Exception:
                 pass
 
-        # 2) Get existing bindings for recovery flow -- build set of already-bound stage names
+        # 2) Get existing bindings for recovery flow -- build set of already-bound stage PKs and names
         existing_bindings = _api_get(f'flows/bindings/?flow__pk={recovery_flow_pk}&ordering=order').get('results', [])
+        bound_stage_pks = set()
         bound_stage_names = set()
         for b in existing_bindings:
             stage_obj = b.get('stage_obj') or {}
             name = stage_obj.get('name', '')
-            if name.startswith('Recovery '):
-                bound_stage_names.add(name)
+            pk = stage_obj.get('pk', '')
+            bound_stage_names.add(name)
+            if pk:
+                bound_stage_pks.add(pk)
 
         # 3) Create all required stages
 
-        # 3a) Identification stage (find user by email/username)
-        id_stage_pk = _find_or_create_stage('stages/identification/', 'Recovery Identification',
-            {'user_fields': ['email', 'username']})
+        # 3a) Identification stage -- reuse Authentik's default (already has email+username)
+        #     Creating a separate one fails on some versions due to user_fields validation.
+        id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
+        if not id_stage_pk:
+            id_stage_pk = _find_stage('stages/identification/', 'Recovery Identification')
+        if not id_stage_pk:
+            all_id_stages = _api_get('stages/identification/').get('results', [])
+            if all_id_stages:
+                id_stage_pk = all_id_stages[0]['pk']
 
         # 3b) Email stage (sends recovery link)
         email_stage_pk = _find_or_create_stage('stages/email/', 'Recovery Email', {
@@ -3222,14 +3231,14 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
 
         # 4) Bind only MISSING stages to recovery flow (never delete, only add)
         desired_bindings = [
-            (10, id_stage_pk, 'Recovery Identification'),
-            (20, email_stage_pk, 'Recovery Email'),
-            (30, prompt_stage_pk, 'Recovery Password Change'),
-            (40, user_write_pk, 'Recovery User Write'),
-            (100, user_login_pk, 'Recovery User Login'),
+            (10, id_stage_pk),
+            (20, email_stage_pk),
+            (30, prompt_stage_pk),
+            (40, user_write_pk),
+            (100, user_login_pk),
         ]
-        for order, stage_pk, stage_name in desired_bindings:
-            if not stage_pk or stage_name in bound_stage_names:
+        for order, stage_pk in desired_bindings:
+            if not stage_pk or stage_pk in bound_stage_pks:
                 continue
             try:
                 _api_post('flows/bindings/', {
