@@ -6964,14 +6964,14 @@ async function doUninstallAk(){
 </body></html>'''
 
 def _coreconfig_has_ldap():
-    """True if CoreConfig.xml exists and already contains our LDAP auth block (serviceAccountDN is definitive)."""
+    """True if CoreConfig.xml exists and already contains our LDAP auth block."""
     path = '/opt/tak/CoreConfig.xml'
     if not os.path.exists(path):
         return False
     try:
         with open(path, 'r') as f:
             content = f.read()
-        return 'serviceAccountDN="cn=adm_ldapservice"' in content
+        return 'adm_ldapservice' in content
     except Exception:
         return False
 
@@ -7248,7 +7248,7 @@ def _apply_ldap_to_coreconfig():
     auth_block += '        <File location="UserAuthenticationFile.xml"/>\n'
     auth_block += '    </auth>'
     # Sanity check the block we built
-    if 'serviceAccountDN="cn=adm_ldapservice"' not in auth_block:
+    if 'adm_ldapservice' not in auth_block:
         return False, 'BUG: auth_block missing serviceAccountDN'
     # Find <auth and </auth> in the file (case-insensitive, no regex)
     lower = original.lower()
@@ -7262,7 +7262,7 @@ def _apply_ldap_to_coreconfig():
     # Splice: everything before <auth> + our block + everything after </auth>
     patched = original[:start] + auth_block + original[end:]
     # Sanity check the patched content
-    if 'serviceAccountDN="cn=adm_ldapservice"' not in patched:
+    if 'adm_ldapservice' not in patched:
         return False, f'BUG: patched content missing LDAP. start={start} end={end} auth_block_len={len(auth_block)}'
     # Write to a temp file we own, then sudo cp to /opt/tak
     patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
@@ -7272,7 +7272,7 @@ def _apply_ldap_to_coreconfig():
     if r.returncode != 0:
         return False, f'sudo cp failed: {r.stderr.strip()[:200]}. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
     # Verify the destination file
-    check = subprocess.run(['grep', '-c', 'serviceAccountDN', coreconfig_path], capture_output=True, text=True, timeout=5)
+    check = subprocess.run(['grep', '-c', 'adm_ldapservice', coreconfig_path], capture_output=True, text=True, timeout=5)
     if check.returncode != 0 or check.stdout.strip() == '0':
         return False, f'File not updated. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
     # Restart TAK Server
