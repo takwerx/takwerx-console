@@ -417,16 +417,18 @@ def takserver_page():
     tak = modules.get('takserver', {})
     ak = modules.get('authentik', {})
     # Show "Connect TAK Server to LDAP" when: TAK Server + Authentik installed, CoreConfig exists, LDAP not yet applied
+    has_ldap = _coreconfig_has_ldap()
     show_connect_ldap = (
         tak.get('installed') and ak.get('installed') and
-        os.path.exists('/opt/tak/CoreConfig.xml') and not _coreconfig_has_ldap()
+        os.path.exists('/opt/tak/CoreConfig.xml') and not has_ldap
     )
+    ldap_connected = tak.get('installed') and ak.get('installed') and has_ldap
     # Reset deploy_done once TAK Server is running so the running view shows
     if tak.get('installed') and tak.get('running') and not deploy_status.get('running', False):
         deploy_status.update({'complete': False, 'error': False})
     return render_template_string(TAKSERVER_TEMPLATE,
         settings=load_settings(), modules=modules, tak=tak,
-        show_connect_ldap=show_connect_ldap,
+        show_connect_ldap=show_connect_ldap, ldap_connected=ldap_connected,
         metrics=get_system_metrics(), version=VERSION, deploying=deploy_status.get('running', False),
         deploy_done=deploy_status.get('complete', False), deploy_error=deploy_status.get('error', False))
 
@@ -8013,6 +8015,11 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px">Authentik is deployed. Connect TAK Server to the same LDAP so users can sign in with their Authentik accounts. This patches CoreConfig.xml and restarts TAK Server once.</p>
 <button type="button" id="connect-ldap-btn" onclick="connectLdap()" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:10px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:600;cursor:pointer">Connect TAK Server to LDAP</button>
 <div id="connect-ldap-msg" style="margin-top:12px;font-size:13px;color:var(--text-secondary)"></div>
+</div>
+{% elif ldap_connected %}
+<div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
+<div style="display:flex;align-items:center;gap:10px"><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
+<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
