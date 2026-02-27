@@ -5656,7 +5656,7 @@ entries:
       path: users
       password: !Context password
   - attrs:
-      authentication: require_outpost
+      authentication: none
       denied_action: message_continue
       designation: authentication
       layout: stacked
@@ -7000,6 +7000,45 @@ def _test_ldap_bind(ldap_pass):
         shell=True, capture_output=True, text=True, timeout=10)
     return 'authenticated' in r.stdout and 'adm_ldapservice' in r.stdout
 
+def _ensure_ldap_flow_authentication_none():
+    """PATCH ldap-authentication-flow to authentication:none and restart LDAP outpost.
+    Fixes 'Flow does not apply to current user' — require_outpost blocks user binds.
+    Returns (True, None) on success, (False, error_msg) on failure."""
+    import urllib.request as _req
+    import urllib.error
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False, 'Authentik .env not found'
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                ak_token = line.strip().split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        return False, 'Authentik token not in .env'
+    ak_dir = os.path.expanduser('~/authentik')
+    if not os.path.exists(os.path.join(ak_dir, 'docker-compose.yml')):
+        return False, 'Authentik not deployed'
+    url = 'http://127.0.0.1:9090'
+    headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    try:
+        req = _req.Request(f'{url}/api/v3/flows/instances/ldap-authentication-flow/',
+            data=json.dumps({'authentication': 'none'}).encode(), headers=headers, method='PATCH')
+        _req.urlopen(req, timeout=15)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            body = ''
+        return False, f'Failed to PATCH LDAP flow: HTTP {e.code} {body}'
+    except Exception as e:
+        return False, str(e)[:120]
+    subprocess.run(f'cd {ak_dir} && docker compose restart ldap 2>&1',
+        shell=True, capture_output=True, timeout=60)
+    time.sleep(3)
+    return True, None
+
 def _ensure_authentik_ldap_service_account():
     """Ensure adm_ldapservice exists, has password set, is in authentik Admins, and VERIFY the bind works.
     Runs before Connect TAK Server to LDAP so LDAP bind works regardless of deploy order."""
@@ -7149,8 +7188,11 @@ def _apply_ldap_to_coreconfig():
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: ensure LDAP service account in Authentik, patch CoreConfig, restart TAK Server.
+    """One-shot: fix LDAP flow auth, ensure service account, patch CoreConfig, restart TAK Server.
     Will NOT patch CoreConfig unless the LDAP bind is verified working first."""
+    ok, err = _ensure_ldap_flow_authentication_none()
+    if not ok:
+        return jsonify({'success': False, 'message': err}), 400
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
         return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
