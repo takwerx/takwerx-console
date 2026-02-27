@@ -7001,7 +7001,8 @@ def _test_ldap_bind(ldap_pass):
     return 'authenticated' in r.stdout and 'adm_ldapservice' in r.stdout
 
 def _ensure_ldap_flow_authentication_none():
-    """PATCH ldap-authentication-flow to authentication:none and restart LDAP outpost.
+    """Ensure ldap-authentication-flow exists with authentication:none, restart LDAP outpost.
+    If flow missing (blueprint never ran), create it by cloning default-authentication-flow.
     Fixes 'Flow does not apply to current user' — require_outpost blocks user binds.
     Returns (True, None) on success, (False, error_msg) on failure."""
     import urllib.request as _req
@@ -7022,22 +7023,70 @@ def _ensure_ldap_flow_authentication_none():
         return False, 'Authentik not deployed'
     url = 'http://127.0.0.1:9090'
     headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+
+    def _get(path):
+        r = _req.Request(f'{url}/api/v3/{path}', headers=headers)
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _post(path, body):
+        r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='POST')
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _patch(path, body):
+        r = _req.Request(f'{url}/api/v3/{path}', data=json.dumps(body).encode(), headers=headers, method='PATCH')
+        _req.urlopen(r, timeout=15)
+
     try:
-        resp = _req.urlopen(_req.Request(f'{url}/api/v3/flows/instances/?slug=ldap-authentication-flow', headers=headers), timeout=15)
-        data = json.loads(resp.read().decode())
-        results = data.get('results', [])
-        flow_pk = results[0]['pk'] if results else None
-        if not flow_pk:
-            return False, 'LDAP flow not found. Restart Authentik (cd ~/authentik && docker compose restart) to create it from the blueprint, then try Connect again.'
-        req = _req.Request(f'{url}/api/v3/flows/instances/{flow_pk}/',
-            data=json.dumps({'authentication': 'none'}).encode(), headers=headers, method='PATCH')
-        _req.urlopen(req, timeout=15)
+        auth_flows = _get('flows/instances/?designation=authentication').get('results', [])
+        ldap_flow = next((f for f in auth_flows if f.get('slug') == 'ldap-authentication-flow'), None)
+        default_flow = next((f for f in auth_flows if f.get('slug') == 'default-authentication-flow'), None)
+
+        if ldap_flow:
+            _patch(f'flows/instances/{ldap_flow["pk"]}/', {'authentication': 'none'})
+        else:
+            if not default_flow:
+                return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
+            default_pk = default_flow['pk']
+            all_bindings = []
+            page = 1
+            while True:
+                data = _get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+                all_bindings.extend(data.get('results', []))
+                if not data.get('pagination', {}).get('next'):
+                    break
+                page += 1
+            default_bindings = [b for b in all_bindings if str(b.get('target')) == str(default_pk)]
+            default_bindings.sort(key=lambda x: x.get('order', 0))
+            new_flow = _post('flows/instances/', {
+                'name': 'ldap-authentication-flow', 'slug': 'ldap-authentication-flow',
+                'title': 'ldap-authentication-flow', 'designation': 'authentication',
+                'authentication': 'none', 'layout': 'stacked', 'denied_action': 'message_continue',
+                'policy_engine_mode': 'any'})
+            new_flow_pk = new_flow['pk']
+            for b in default_bindings:
+                s = b.get('stage')
+                stage_pk = s if isinstance(s, int) else (s.get('pk') if isinstance(s, dict) and s else s)
+                if not stage_pk:
+                    continue
+                try:
+                    _post('flows/bindings/', {
+                        'target': new_flow_pk, 'stage': stage_pk, 'order': b.get('order', 0),
+                        'evaluate_on_plan': b.get('evaluate_on_plan', True),
+                        're_evaluate_policies': b.get('re_evaluate_policies', True),
+                        'policy_engine_mode': b.get('policy_engine_mode', 'any'),
+                        'invalid_response_action': b.get('invalid_response_action', 'retry')})
+                except urllib.error.HTTPError:
+                    pass
+            providers = _get('providers/ldap/?search=LDAP').get('results', [])
+            ldap_provider = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
+            if ldap_provider:
+                _patch(f'providers/ldap/{ldap_provider["pk"]}/', {'authorization_flow': new_flow_pk})
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode()[:200]
         except Exception:
             body = ''
-        return False, f'Failed to PATCH LDAP flow: HTTP {e.code} {body}'
+        return False, f'Authentik API {e.code}: {body}'
     except Exception as e:
         return False, str(e)[:120]
     subprocess.run(f'cd {ak_dir} && docker compose restart ldap 2>&1',
