@@ -6984,8 +6984,17 @@ def _coreconfig_has_ldap():
     except Exception:
         return False
 
+def _test_ldap_bind(ldap_pass):
+    """Actually test the LDAP bind with ldapsearch. Returns True if bind succeeds."""
+    r = subprocess.run(
+        ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
+         '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
+         '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
+        capture_output=True, text=True, timeout=10)
+    return r.returncode == 0
+
 def _ensure_authentik_ldap_service_account():
-    """Ensure adm_ldapservice exists, has password set, and is in authentik Admins (workaround for search_full_directory bug).
+    """Ensure adm_ldapservice exists, has password set, is in authentik Admins, and VERIFY the bind works.
     Runs before Connect TAK Server to LDAP so LDAP bind works regardless of deploy order."""
     import urllib.request as _req
     import urllib.error
@@ -7006,18 +7015,31 @@ def _ensure_authentik_ldap_service_account():
     url = 'http://127.0.0.1:9090'
     headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
     try:
+        # 1. Find or create the service account
         req = _req.Request(f'{url}/api/v3/core/users/?search=adm_ldapservice', headers=headers)
         resp = _req.urlopen(req, timeout=10)
         users = json.loads(resp.read().decode())['results']
-        uid = next((u['pk'] for u in users if u.get('username') == 'adm_ldapservice'), None)
+        user_obj = next((u for u in users if u.get('username') == 'adm_ldapservice'), None)
+        uid = user_obj['pk'] if user_obj else None
         if not uid:
             req = _req.Request(f'{url}/api/v3/core/users/', data=json.dumps({
-                'username': 'adm_ldapservice', 'name': 'LDAP Service Account', 'is_active': True, 'type': 'service_account'
+                'username': 'adm_ldapservice', 'name': 'LDAP Service Account',
+                'is_active': True, 'type': 'service_account',
+                'path': 'users',
             }).encode(), headers=headers, method='POST')
             resp = _req.urlopen(req, timeout=10)
-            uid = json.loads(resp.read().decode())['pk']
-        req = _req.Request(f'{url}/api/v3/core/users/{uid}/set_password/', data=json.dumps({'password': ldap_pass}).encode(), headers=headers, method='POST')
-        _req.urlopen(req, timeout=10)
+            user_obj = json.loads(resp.read().decode())
+            uid = user_obj['pk']
+        # 2. Ensure user is active
+        if user_obj and not user_obj.get('is_active', True):
+            req = _req.Request(f'{url}/api/v3/core/users/{uid}/', data=json.dumps({'is_active': True}).encode(), headers=headers, method='PATCH')
+            _req.urlopen(req, timeout=10)
+        # 3. Set the password
+        req = _req.Request(f'{url}/api/v3/core/users/{uid}/set_password/',
+            data=json.dumps({'password': ldap_pass}).encode(), headers=headers, method='POST')
+        pw_resp = _req.urlopen(req, timeout=10)
+        pw_code = pw_resp.getcode()
+        # 4. Add to authentik Admins group
         req = _req.Request(f'{url}/api/v3/core/groups/?search=authentik+Admins', headers=headers)
         resp = _req.urlopen(req, timeout=10)
         groups = json.loads(resp.read().decode())['results']
@@ -7026,15 +7048,29 @@ def _ensure_authentik_ldap_service_account():
             users_raw = admins.get('users') or []
             member_pks = [u.get('pk') if isinstance(u, dict) else u for u in users_raw]
             if uid not in member_pks:
-                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/add_user/', data=json.dumps({'pk': uid}).encode(), headers=headers, method='POST')
+                req = _req.Request(f'{url}/api/v3/core/groups/{admins["pk"]}/add_user/',
+                    data=json.dumps({'pk': uid}).encode(), headers=headers, method='POST')
                 _req.urlopen(req, timeout=10)
-        subprocess.run('cd ~/authentik && docker compose restart ldap 2>/dev/null', shell=True, capture_output=True, timeout=30)
-        time.sleep(10)
-        return True, ''
+        else:
+            return False, 'authentik Admins group not found'
+        # 5. Force-recreate the LDAP outpost so it picks up the new credentials
+        subprocess.run('cd ~/authentik && docker compose up -d --force-recreate ldap 2>/dev/null',
+            shell=True, capture_output=True, timeout=60)
+        # 6. Wait for LDAP outpost to be healthy, then VERIFY the bind
+        for attempt in range(6):
+            time.sleep(5)
+            if _test_ldap_bind(ldap_pass):
+                return True, f'LDAP bind verified (attempt {attempt + 1})'
+        return False, f'LDAP service account created (set_password: {pw_code}) but bind verification failed after 30s — ldapsearch returns Invalid credentials'
     except urllib.error.HTTPError as e:
-        return False, f'Authentik API: {e.code}'
+        body = ''
+        try:
+            body = e.read().decode()[:200]
+        except Exception:
+            pass
+        return False, f'Authentik API {e.code}: {body}'
     except Exception as e:
-        return False, str(e)[:80]
+        return False, str(e)[:120]
 
 def _apply_ldap_to_coreconfig():
     """Patch CoreConfig.xml with LDAP auth and restart TAK Server. Returns (success, message)."""
@@ -7101,10 +7137,11 @@ def _apply_ldap_to_coreconfig():
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: ensure LDAP service account in Authentik, patch CoreConfig, restart TAK Server."""
+    """One-shot: ensure LDAP service account in Authentik, patch CoreConfig, restart TAK Server.
+    Will NOT patch CoreConfig unless the LDAP bind is verified working first."""
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
-        return jsonify({'success': False, 'message': f'LDAP setup: {msg}'}), 400
+        return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
     ok, msg = _apply_ldap_to_coreconfig()
     return jsonify({'success': ok, 'message': msg})
 
