@@ -6986,13 +6986,19 @@ def _coreconfig_has_ldap():
         return False
 
 def _test_ldap_bind(ldap_pass):
-    """Actually test the LDAP bind with ldapsearch. Returns True if bind succeeds."""
-    r = subprocess.run(
+    """Test LDAP bind by triggering a connection and checking the outpost logs.
+    ldapsearch CLI is incompatible with Authentik's LDAP outpost (returns error 49
+    even when the outpost authenticates successfully), so we verify via outpost logs."""
+    subprocess.run(
         ['ldapsearch', '-x', '-H', 'ldap://127.0.0.1:389',
          '-D', 'cn=adm_ldapservice,ou=users,dc=takldap', '-w', ldap_pass,
          '-b', 'dc=takldap', '-s', 'base', '(objectClass=*)'],
         capture_output=True, text=True, timeout=10)
-    return r.returncode == 0
+    time.sleep(1)
+    r = subprocess.run(
+        'docker logs authentik-ldap-1 --since 10s 2>&1',
+        shell=True, capture_output=True, text=True, timeout=10)
+    return 'authenticated' in r.stdout and 'adm_ldapservice' in r.stdout
 
 def _ensure_authentik_ldap_service_account():
     """Ensure adm_ldapservice exists, has password set, is in authentik Admins, and VERIFY the bind works.
