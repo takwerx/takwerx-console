@@ -9,7 +9,7 @@
 - Fresh Ubuntu 22.04 LTS VPS (4+ vCPU, 8GB+ RAM, 50GB+ disk)
 - A domain name with a wildcard DNS A record pointing to the VPS (e.g. `*.takwerx.org → 190.x.x.x`)
 - TAK Server `.deb` package from [tak.gov](https://tak.gov)
-- ATAK client (Android) for device enrollment testing
+- TAK client (e.g. ATAK on Android, WinTAK, iTAK) for device enrollment testing
 
 ---
 
@@ -106,7 +106,7 @@ Work through these in order. Each step depends on the previous.
 | Authentik LDAP auth | ✅ Working | Fixed in v0.1.5 |
 | TAK Portal forward auth | ✅ Working | Fixed in v0.1.5 |
 | TAK Portal self-service enrollment | 🚧 In Development | `/request-access` page exists, backend WIP |
-| ATAK device QR enrollment | 🚧 In Development | Via TAK Portal, not yet tested end-to-end |
+| TAK client QR enrollment | 🚧 In Development | Via TAK Portal, not yet tested end-to-end |
 | CloudTAK | ⚠️ Placeholder | Card visible, deploy not yet implemented |
 | MediaMTX video streaming | ⚠️ Placeholder | Card visible, config editor UI exists, deploy not yet implemented |
 | Node-RED | ⚠️ Placeholder | Card visible, deploy not yet implemented |

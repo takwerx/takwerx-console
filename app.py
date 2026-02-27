@@ -708,6 +708,8 @@ def generate_caddyfile(settings=None):
         lines.append(f"            transport http {{")
         lines.append(f"                tls")
         lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"                read_timeout 1h")
+        lines.append(f"                write_timeout 1h")
         lines.append(f"            }}")
         lines.append(f"        }}")
         lines.append(f"    }}")
@@ -722,6 +724,8 @@ def generate_caddyfile(settings=None):
         lines.append(f"            transport http {{")
         lines.append(f"                tls")
         lines.append(f"                tls_insecure_skip_verify")
+        lines.append(f"                read_timeout 1h")
+        lines.append(f"                write_timeout 1h")
         lines.append(f"            }}")
         lines.append(f"        }}")
         lines.append(f"    }}")
@@ -730,6 +734,8 @@ def generate_caddyfile(settings=None):
         lines.append(f"        transport http {{")
         lines.append(f"            tls")
         lines.append(f"            tls_insecure_skip_verify")
+        lines.append(f"            read_timeout 1h")
+        lines.append(f"            write_timeout 1h")
         lines.append(f"        }}")
         lines.append(f"    }}")
     lines.append(f"}}")
@@ -837,7 +843,7 @@ def generate_caddyfile(settings=None):
         lines.append(f"}}")
         lines.append("")
 
-    # MediaMTX — stream.domain (behind Authentik when installed). Web editor only; drone/controller/ATAK push to 8554/8890.
+    # MediaMTX — stream.domain (behind Authentik when installed). Web editor only; drone/controller/TAK clients push to 8554/8890.
     mtx = modules.get('mediamtx', {})
     if mtx.get('installed'):
         mtx_domain = settings.get('mediamtx_domain', f'stream.{domain}')
@@ -902,7 +908,7 @@ def wait_for_apt_lock(log_fn, log_list):
 def install_le_cert_on_8446(domain, log_fn, wait_for_cert=True):
     """
     Install the Caddy-managed Let's Encrypt cert on TAK Server's port 8446
-    so ATAK trusts the enrollment endpoint without a data package.
+    so TAK clients trust the enrollment endpoint without a data package.
 
     Called from:
       - run_caddy_deploy  (Step 5/5) — wait_for_cert=True  (Caddy just started, cert may need a moment)
@@ -1076,7 +1082,7 @@ WantedBy=timers.target
     log_fn("  Restarting TAK Server to load LE cert on port 8446...")
     subprocess.run('systemctl restart takserver 2>/dev/null; true', shell=True, capture_output=True)
     log_fn("  ✓ TAK Server restarted")
-    log_fn("✓ Port 8446 now serving Let's Encrypt cert — ATAK enrollment ready")
+    log_fn("✓ Port 8446 now serving Let's Encrypt cert — ready for TAK clients")
     return True
 
 
@@ -2054,6 +2060,34 @@ WantedBy=multi-user.target
                 subprocess.run(f"sed -i 's/video\\./stream./g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
                 plog("  Stream URL host set to stream.*")
             plog("✓ Web editor installed (port 5080, API 9898)")
+
+            # LDAP overlay: when Authentik is present, patch editor for header auth + Stream Access page
+            if ldap_available:
+                overlay_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mediamtx_ldap_overlay.py')
+                overlay_dst = f'{webeditor_dir}/mediamtx_ldap_overlay.py'
+                if os.path.exists(overlay_src):
+                    subprocess.run(f'cp "{overlay_src}" "{overlay_dst}"', shell=True)
+                    # Inject import before app.run() — the overlay registers routes + before_request
+                    editor_file = f'{webeditor_dir}/mediamtx_config_editor.py'
+                    with open(editor_file, 'r') as ef:
+                        editor_src = ef.read()
+                    inject_block = (
+                        "\n# --- infra-TAK LDAP overlay ---\n"
+                        "import os as _os\n"
+                        "if _os.environ.get('LDAP_ENABLED'):\n"
+                        "    import sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
+                        "    from mediamtx_ldap_overlay import apply_ldap_overlay\n"
+                        "    apply_ldap_overlay(app)\n"
+                        "# --- end LDAP overlay ---\n"
+                    )
+                    # Insert before app.run() so overlay routes are registered first
+                    if 'app.run(' in editor_src and 'LDAP overlay' not in editor_src:
+                        editor_src = editor_src.replace('    app.run(', inject_block + '    app.run(', 1)
+                        with open(editor_file, 'w') as ef:
+                            ef.write(editor_src)
+                    plog("✓ LDAP overlay applied (Authentik header auth + Stream Access)")
+                else:
+                    plog("⚠ mediamtx_ldap_overlay.py not found next to app.py — LDAP overlay skipped")
         else:
             plog("⚠ mediamtx_config_editor.py not found (clone failed and no local file)")
             plog("  Place it next to app.py or in config-editor/, or fix repo access, then redeploy")
@@ -2071,8 +2105,23 @@ WantedBy=multi-user.target
         else:
             plog("⚠ Test video download failed — you can upload it manually via the web console")
 
-        # Web editor systemd service
-        webeditor_svc = """[Unit]
+        # Web editor systemd service — add LDAP env vars when Authentik is present
+        ldap_env_lines = ''
+        if ldap_available:
+            ak_env_path = os.path.expanduser('~/authentik/.env')
+            ak_token_val = ''
+            if os.path.exists(ak_env_path):
+                with open(ak_env_path) as _f:
+                    for _line in _f:
+                        if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                            ak_token_val = _line.strip().split('=', 1)[1].strip()
+            ldap_env_lines = (
+                f'Environment=LDAP_ENABLED=1\n'
+                f'Environment=AUTHENTIK_API_URL=http://127.0.0.1:9090\n'
+                f'Environment=AUTHENTIK_TOKEN={ak_token_val}\n'
+            )
+
+        webeditor_svc = f"""[Unit]
 Description=MediaMTX Web Configuration Editor
 After=network.target mediamtx.service
 
@@ -2082,7 +2131,7 @@ ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
 WorkingDirectory=/opt/mediamtx-webeditor
 Environment=PORT=5080
 Environment=MEDIAMTX_API_URL=http://127.0.0.1:9898
-Restart=always
+{ldap_env_lines}Restart=always
 RestartSec=5
 User=root
 
@@ -2191,7 +2240,7 @@ WantedBy=multi-user.target
                                 plog(f"  ⚠ Could not create {group_name}: {e.code}")
                         except Exception as ex:
                             plog(f"  ⚠ Could not create {group_name}: {str(ex)[:60]}")
-                    plog("  Assign users to vid_* groups in MediaMTX stream-access page or Authentik (they do not show in TAK/ATAK).")
+                    plog("  Assign users to vid_* groups in MediaMTX stream-access page or Authentik (they do not show in TAK clients).")
 
             plog("")
             plog("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -2724,6 +2773,7 @@ def run_email_deploy(provider_key, smtp_user, smtp_pass, from_addr, from_name):
         relay_port = provider['port']
         main_cf_additions = f"""
 # TAKWERX Email Relay — managed by TAK-infra
+inet_interfaces = all
 mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12
 relayhost = [{relay_host}]:{relay_port}
 smtp_sasl_auth_enable = yes
@@ -2819,6 +2869,17 @@ smtp_generic_maps = hash:/etc/postfix/generic
         status.update({'running': False, 'error': True})
 
 
+def _authentik_smtp_configured():
+    """True if Authentik .env has email settings (SMTP was pushed by Configure Authentik or deploy)."""
+    env_path = os.path.expanduser('~/authentik/.env')
+    if not os.path.exists(env_path):
+        return False
+    with open(env_path) as f:
+        for line in f:
+            if line.strip().startswith('AUTHENTIK_EMAIL__HOST=') and '=' in line and line.strip().split('=', 1)[1].strip():
+                return True
+    return False
+
 @app.route('/emailrelay')
 @login_required
 def emailrelay_page():
@@ -2826,9 +2887,11 @@ def emailrelay_page():
     email = modules.get('emailrelay', {})
     settings = load_settings()
     relay_config = settings.get('email_relay', {})
+    authentik_smtp_configured = modules.get('authentik', {}).get('installed') and _authentik_smtp_configured()
     return render_template_string(EMAIL_RELAY_TEMPLATE,
         settings=settings, modules=modules, email=email,
         relay_config=relay_config, providers=PROVIDERS,
+        authentik_smtp_configured=authentik_smtp_configured,
         metrics=get_system_metrics(), version=VERSION,
         deploying=email_deploy_status.get('running', False),
         deploy_done=email_deploy_status.get('complete', False),
@@ -3009,14 +3072,41 @@ services:
     if os.path.exists(main_cf_path):
         with open(main_cf_path) as f:
             mc = f.read()
+        changed = False
+        # So Docker (Authentik) can connect: listen on all interfaces
+        if _re.search(r'^\s*inet_interfaces\s*=\s*localhost', mc, flags=_re.MULTILINE):
+            mc = _re.sub(r'^\s*inet_interfaces\s*=\s*.*$', 'inet_interfaces = all', mc, flags=_re.MULTILINE)
+            changed = True
+        elif 'inet_interfaces' not in mc or _re.search(r'^\s*#\s*inet_interfaces', mc, flags=_re.MULTILINE):
+            if mc.strip() and not mc.endswith('\n\n'):
+                mc = mc.rstrip() + '\n'
+            mc += 'inet_interfaces = all\n'
+            changed = True
         if '172.16.0.0/12' not in mc:
             mc = _re.sub(r'^\s*mynetworks\s*=.*$', '', mc, flags=_re.MULTILINE)
             if mc.strip() and not mc.endswith('\n\n'):
                 mc = mc.rstrip() + '\n'
             mc += 'mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12\n'
+            changed = True
+        if changed:
             with open(main_cf_path, 'w') as f:
                 f.write(mc)
             subprocess.run('systemctl restart postfix 2>&1', shell=True, capture_output=True, text=True, timeout=30)
+
+    # Allow Docker networks to reach host port 25 (Authentik worker → Postfix)
+    r = subprocess.run('which ufw', shell=True, capture_output=True)
+    if r.returncode == 0:
+        subprocess.run('ufw allow from 172.16.0.0/12 to any port 25 2>/dev/null; true', shell=True, capture_output=True)
+        subprocess.run('ufw reload 2>/dev/null; true', shell=True, capture_output=True)
+        _log("  UFW: allowed Docker networks → port 25")
+    else:
+        r = subprocess.run('which firewall-cmd', shell=True, capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(
+                'firewall-cmd --permanent --add-rich-rule=\'rule family="ipv4" source address="172.16.0.0/12" port port="25" protocol="tcp" accept\' 2>/dev/null; true',
+                shell=True, capture_output=True)
+            subprocess.run('firewall-cmd --reload 2>/dev/null; true', shell=True, capture_output=True)
+            _log("  firewalld: allowed Docker networks → port 25")
 
     _log("  Restarting Authentik containers...")
     r = subprocess.run(
@@ -3633,6 +3723,158 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
     except Exception as e:
         log(f"  ⚠ Console forward auth setup: {str(e)[:100]}")
         return False
+
+
+def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
+    """Restrict infra-TAK, Node-RED, MediaMTX to authentik Admins; TAK Portal open to all authenticated users.
+    Creates a 'Group membership: authentik Admins' policy and binds it to admin-only apps.
+    Idempotent — safe to call on every deploy."""
+    import urllib.request as _req
+    import urllib.error
+    _log = plog or (lambda m: None)
+
+    def _api_get(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers)
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _api_post(path, body):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
+        return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    try:
+        # 1) Find the "authentik Admins" group PK
+        groups = _api_get('core/groups/?search=authentik+Admins')['results']
+        admin_group_pk = None
+        for g in groups:
+            if g.get('name') == 'authentik Admins':
+                admin_group_pk = g['pk']
+                break
+        if not admin_group_pk:
+            _log("  ⚠ 'authentik Admins' group not found — skipping app access policies")
+            return False
+
+        # 2) Find or create the "Allow authentik Admins" group membership policy
+        policy_name = 'Allow authentik Admins'
+        policies = _api_get(f'policies/group_membership/?search={_req.quote(policy_name)}')['results']
+        policy_pk = None
+        for p in policies:
+            if p.get('name') == policy_name:
+                policy_pk = p['pk']
+                break
+        if not policy_pk:
+            try:
+                data = _api_post('policies/group_membership/', {
+                    'name': policy_name,
+                    'group': admin_group_pk,
+                })
+                policy_pk = data['pk']
+                _log(f"  ✓ Created policy: {policy_name}")
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    policies = _api_get(f'policies/group_membership/?search={_req.quote(policy_name)}')['results']
+                    for p in policies:
+                        if p.get('name') == policy_name:
+                            policy_pk = p['pk']
+                    if not policy_pk:
+                        _log(f"  ⚠ Could not create policy: {e}")
+                        return False
+                else:
+                    raise
+        else:
+            _log(f"  ✓ Policy exists: {policy_name}")
+
+        # 3) Admin-only apps: bind the admin policy (infra-TAK, Node-RED, LDAP)
+        admin_only_slugs = ['infra-tak', 'infratak', 'console', 'node-red', 'ldap']
+        mediamtx_slugs = ['mediamtx', 'stream']
+        tak_portal_slug = 'tak-portal'
+
+        all_apps = _api_get('core/applications/?page_size=100')['results']
+
+        def _bind_policy_to_app(app_pk, app_name, pol_pk, pol_name):
+            bindings = _api_get(f'policies/bindings/?target={app_pk}&page_size=100')['results']
+            already = any(
+                str(b.get('policy')) == str(pol_pk) or
+                (b.get('policy_obj', {}) or {}).get('name') == pol_name
+                for b in bindings
+            )
+            if already:
+                return False
+            try:
+                _api_post('policies/bindings/', {
+                    'target': app_pk, 'policy': pol_pk,
+                    'order': 0, 'negate': False, 'enabled': True, 'timeout': 30,
+                })
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code != 400:
+                    _log(f"  ⚠ {app_name}: binding error: {e}")
+                return False
+
+        # 4) MediaMTX: expression policy — admins OR vid_admin/vid_private/vid_public
+        mtx_policy_name = 'Allow MediaMTX users'
+        mtx_policy_pk = None
+        mtx_expression = (
+            'return ak_is_group_member(request.user, name="authentik Admins") '
+            'or ak_is_group_member(request.user, name="vid_admin") '
+            'or ak_is_group_member(request.user, name="vid_private") '
+            'or ak_is_group_member(request.user, name="vid_public")'
+        )
+        try:
+            existing = _api_get(f'policies/expression/?search={_req.quote(mtx_policy_name)}')['results']
+            for p in existing:
+                if p.get('name') == mtx_policy_name:
+                    mtx_policy_pk = p['pk']
+                    break
+        except Exception:
+            pass
+        if not mtx_policy_pk:
+            try:
+                data = _api_post('policies/expression/', {
+                    'name': mtx_policy_name,
+                    'expression': mtx_expression,
+                })
+                mtx_policy_pk = data['pk']
+                _log(f"  ✓ Created policy: {mtx_policy_name}")
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    try:
+                        existing = _api_get(f'policies/expression/?search={_req.quote(mtx_policy_name)}')['results']
+                        for p in existing:
+                            if p.get('name') == mtx_policy_name:
+                                mtx_policy_pk = p['pk']
+                    except Exception:
+                        pass
+                if not mtx_policy_pk:
+                    _log(f"  ⚠ Could not create MediaMTX policy: {e}")
+        else:
+            _log(f"  ✓ Policy exists: {mtx_policy_name}")
+
+        for app in all_apps:
+            app_slug = app.get('slug', '')
+            app_pk = app.get('pk', '')
+            app_name = app.get('name', '')
+
+            if app_slug in admin_only_slugs:
+                if _bind_policy_to_app(app_pk, app_name, policy_pk, policy_name):
+                    _log(f"  ✓ {app_name}: restricted to authentik Admins")
+                else:
+                    _log(f"  ✓ {app_name}: already restricted to authentik Admins")
+
+            elif app_slug in mediamtx_slugs and mtx_policy_pk:
+                if _bind_policy_to_app(app_pk, app_name, mtx_policy_pk, mtx_policy_name):
+                    _log(f"  ✓ {app_name}: visible to authentik Admins + vid_admin/vid_private/vid_public")
+                else:
+                    _log(f"  ✓ {app_name}: already has MediaMTX access policy")
+
+            elif app_slug == tak_portal_slug:
+                _log(f"  ✓ {app_name}: open to all authenticated users (no restrictive binding)")
+
+        return True
+
+    except Exception as e:
+        _log(f"  ⚠ App access policy setup: {str(e)[:150]}")
+        return False
+
 
 def run_nodered_deploy():
     def plog(msg):
@@ -4588,9 +4830,11 @@ Configure TAK Portal and MediaMTX to use the local relay:<br><br>
 
 {% if modules.get('authentik', {}).get('installed') %}
 <div class="section-title">Configure Authentik</div>
-<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
-<p style="margin:0 0 16px 0;color:var(--text-muted)">Push this relay (localhost:25) and your From address into Authentik so recovery emails and other Authentik mail use the same relay.</p>
+<div id="cfg-ak-card" style="background:var(--bg-card);border:1px solid {% if authentik_smtp_configured %}rgba(16,185,129,0.4){% else %}var(--border){% endif %};border-radius:12px;padding:24px;margin-bottom:24px;border-left:4px solid {% if authentik_smtp_configured %}var(--green){% else %}var(--border){% endif %}">
+<p style="margin:0 0 8px 0;color:var(--text-muted)">Push this relay (localhost:25) and your From address into Authentik so recovery emails and other Authentik mail use the same relay. After you deploy Email Relay, this runs automatically; you can also click below to run it now or after switching providers.</p>
+<p id="cfg-ak-status" style="margin:0 0 16px 0;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600">{% if authentik_smtp_configured %}<span style="color:var(--green)">✓ Authentik SMTP: Configured</span> — password recovery will use this relay.{% else %}<span style="color:var(--yellow)">Authentik SMTP: Not configured</span> — click the button below so &quot;Forgot username or password&quot; emails are sent.{% endif %}</p>
 <button onclick="configureAuthentik()" id="cfg-ak-btn" style="padding:12px 24px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;cursor:pointer">Configure Authentik to use these settings</button>
+<p style="margin:8px 0 0 0;font-size:11px;color:var(--text-dim)">If you switch providers later, click this again to push the new relay into Authentik.</p>
 <div id="cfg-ak-result" style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;display:none"></div>
 </div>
 {% endif %}
@@ -4747,7 +4991,7 @@ async function configureAuthentik(){
     btn.disabled=true;res.style.display='block';res.style.color='var(--text-dim)';res.textContent='Configuring...';
     var r=await fetch('/api/emailrelay/configure-authentik',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     var d=await r.json();
-    if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.message}
+    if(d.success){res.style.color='var(--green)';res.textContent='✓ '+d.message;setTimeout(function(){location.reload();},1500)}
     else{res.style.color='var(--red)';res.textContent='✗ '+(d.error||'Failed')}
     btn.disabled=false;
 }
@@ -4887,7 +5131,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 <div class="section-title">What You Get With a Domain</div>
 <div class="benefit-grid">
-<div class="benefit-item"><div class="icon">📱</div><div class="title">ATAK QR Enrollment</div><div class="desc">Android devices can enroll via QR code with trusted SSL certificates</div></div>
+<div class="benefit-item"><div class="icon">📱</div><div class="title">TAK Client QR Enrollment</div><div class="desc">Devices can enroll via QR code with trusted SSL certificates (ATAK, WinTAK, iTAK, etc.)</div></div>
 <div class="benefit-item"><div class="icon">🔐</div><div class="title">TAK Portal Auth</div><div class="desc">Secure TAK Portal with Authentik SSO — no more anonymous access</div></div>
 <div class="benefit-item"><div class="icon">🔒</div><div class="title">Trusted SSL</div><div class="desc">Let's Encrypt certificates — no more browser warnings</div></div>
 <div class="benefit-item"><div class="icon"><img src="{{ mediamtx_logo_url }}" alt="" style="width:28px;height:28px;object-fit:contain"></div><div class="title">Secure Streaming</div><div class="desc">MediaMTX streams over HTTPS with its own subdomain</div></div>
@@ -6538,6 +6782,11 @@ entries:
                     plog("")
                     plog("  Configuring Authentik for infra-TAK Console...")
                     _ensure_authentik_console_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
+
+                    # Set application access policies: admin-only apps restricted to authentik Admins
+                    plog("")
+                    plog("  Configuring application access policies...")
+                    _ensure_app_access_policies(ak_url, ak_headers, plog)
                 else:
                     plog("  ⚠ No bootstrap token, skipping forward auth setup")
             except Exception as e:
@@ -6576,11 +6825,25 @@ entries:
             generate_caddyfile(settings)
             subprocess.run('systemctl reload caddy 2>/dev/null; true', shell=True, capture_output=True)
             plog(f"  ✓ Caddy config updated for Authentik")
+        # If Email Relay is already configured, push SMTP + recovery flow into Authentik now (persistent)
+        relay = settings.get('email_relay') or {}
+        if relay.get('from_addr'):
+            plog("")
+            plog("🔑 Email Relay is configured — configuring Authentik (SMTP + password recovery)...")
+            try:
+                ak_msg = _configure_authentik_smtp_and_recovery(relay.get('from_addr'), plog)
+                plog(f"  ✓ {ak_msg}")
+            except Exception as e:
+                plog(f"  ⚠ Authentik SMTP auto-config failed: {e}")
+                plog("  You can run it from Email Relay → 'Configure Authentik to use these settings'.")
         plog("=" * 50)
         plog("  Next steps:")
         plog("  1. Launch Authentik Admin (link below), then come back and refresh this page to get the akadmin password.")
         plog("     After logging in: Admin interface → Groups → authentik Admins → Users → Add new user, add email, create user.")
-        plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
+        if not relay.get('from_addr'):
+            plog("  2. Go to Email Relay and set up SMTP; then use 'Configure Authentik to use these settings'.")
+        else:
+            plog("  2. SMTP and password recovery are already configured (Email Relay was set up).")
         plog("=" * 50)
         plog("  ✓ Deploy complete.")
         authentik_deploy_status.update({'running': False, 'complete': True})
@@ -7109,6 +7372,9 @@ def _ensure_ldap_flow_authentication_none():
 def _ensure_authentik_ldap_service_account():
     """Ensure adm_ldapservice exists, has password set, is in authentik Admins, and VERIFY the bind works.
     Runs before Connect TAK Server to LDAP so LDAP bind works regardless of deploy order."""
+    ok, err = _ensure_ldap_flow_authentication_none()
+    if not ok:
+        return False, f'LDAP flow fix failed: {err}'
     import urllib.request as _req
     import urllib.error
     env_path = os.path.expanduser('~/authentik/.env')
@@ -7183,7 +7449,7 @@ def _ensure_authentik_ldap_service_account():
             if _test_ldap_bind(ldap_pass):
                 return True, f'LDAP bind verified (attempt {attempt + 1})'
         # Verification failed — outpost may not log service account binds, or format differs.
-        # Proceed anyway; service account exists and password is set. User can test with ATAK.
+        # Proceed anyway; service account exists and password is set. User can test with a TAK client.
         return True, 'LDAP service account configured (bind verification inconclusive — outpost may not log service-account binds). Proceeding.'
     except urllib.error.HTTPError as e:
         body = ''
@@ -7347,10 +7613,7 @@ def _ensure_authentik_webadmin():
 @app.route('/api/takserver/connect-ldap', methods=['POST'])
 @login_required
 def takserver_connect_ldap():
-    """One-shot: fix LDAP flow auth, ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
-    ok, err = _ensure_ldap_flow_authentication_none()
-    if not ok:
-        return jsonify({'success': False, 'message': err}), 400
+    """One-shot: fix LDAP flow auth (inside service account), ensure service account, ensure webadmin, patch CoreConfig, restart TAK Server."""
     ok, msg = _ensure_authentik_ldap_service_account()
     if not ok:
         return jsonify({'success': False, 'message': f'LDAP bind failed: {msg}'}), 400
@@ -7760,9 +8023,9 @@ def run_takserver_deploy(config):
         log_step("Creating user certificate...")
         run_cmd('cd /opt/tak/certs && sudo -u tak ./makeCert.sh client user 2>&1', quiet=True)
         log_step("✓ All certificates created")
-        log_step("Importing root CA into enrollment truststore...")
+        log_step("Importing root CA into TAK clients truststore...")
         run_cmd(f'keytool -import -alias root-ca -file /opt/tak/certs/files/root-ca.pem -keystore /opt/tak/certs/files/truststore-{int_ca}.jks -storepass atakatak -noprompt 2>&1', check=False)
-        log_step("✓ Root CA imported into truststore (ATAK enrollment trust chain complete)")
+        log_step("✓ Root CA imported into truststore (TAK clients trust chain complete)")
         log_step("Restarting TAK Server...")
         run_cmd('systemctl stop takserver'); time.sleep(10)
         run_cmd('pkill -9 -f takserver 2>/dev/null; true', check=False); time.sleep(5)
@@ -8034,7 +8297,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
 <div>
 <div style="font-size:13px;font-weight:600;color:var(--yellow)">🔒 No Domain Configured — Running in IP-Only Mode</div>
-<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no ATAK QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no TAK client QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
 </div>
 <a href="/caddy" style="padding:8px 18px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap">Set Up Domain →</a>
 </div>
@@ -8081,6 +8344,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </a>
 {% endfor %}
 {% endif %}
+</div>
+<div class="help-footer" style="margin-top:48px;padding-top:24px;border-top:1px solid var(--border);font-size:12px;color:var(--text-dim)">
+<details style="cursor:pointer">
+<summary style="font-weight:600;color:var(--text-secondary);margin-bottom:8px">Help — backdoor, deployment steps, reset password</summary>
+<div style="margin-top:12px;line-height:1.6">
+<p style="margin-bottom:8px"><strong>Backdoor (when Authentik is down or you're locked out):</strong> The console is always reachable at <strong>IP:5001</strong> — e.g. <code style="background:var(--bg-card);padding:2px 6px;border-radius:4px">https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</code>. Accept the self-signed cert and log in with your console password. This path does not go through Authentik.</p>
+<p style="margin-bottom:8px"><strong>Deployment order:</strong> (1) Caddy — set FQDN and TLS · (2) Authentik · (3) Email Relay (Configure Authentik runs automatically; button remains for switching providers) · (4) TAK Server — upload .deb/.rpm and deploy · (5) TAK Portal · (6) Connect TAK Server to LDAP (button on TAK Server page) · (7) Node-RED, MediaMTX, CloudTAK as needed.</p>
+<p style="margin-bottom:8px"><strong>Reset console password from CLI:</strong> SSH to the server, go to the repo directory (e.g. <code style="background:var(--bg-card);padding:2px 6px;border-radius:4px">cd ~/infra-TAK</code>), then run <code style="background:var(--bg-card);padding:2px 6px;border-radius:4px">sudo ./reset-console-password.sh</code>. Then open the backdoor URL above and log in with the new password.</p>
+<p style="margin-bottom:0">Full docs and commands: <a href="https://github.com/takwerx/infra-TAK" target="_blank" rel="noopener" style="color:var(--cyan);text-decoration:none">github.com/takwerx/infra-TAK</a> (README, docs/COMMANDS.md, docs/HANDOFF-LDAP-AUTHENTIK.md)</p>
+</div>
+</details>
 </div>
 </div>
 <script>
@@ -8178,7 +8452,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
 <div>
 <div style="font-size:13px;font-weight:600;color:var(--yellow)">🔒 No Domain Configured — Running in IP-Only Mode</div>
-<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no ATAK QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
+<div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5">Without a domain: no TAK client QR enrollment · no TAK Portal authentication · no trusted SSL · self-signed certs only</div>
 </div>
 <a href="/caddy" style="padding:8px 18px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap">Set Up Domain →</a>
 </div>
@@ -8336,6 +8610,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="section-title">Deploy TAK Server</div>
 <div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
 <div class="upload-icon">📦</div><div class="upload-text">Drop your TAK Server files here</div>
+<div class="upload-hint" style="margin-bottom:6px"><span style="color:var(--text-dim);font-size:12px">Slow upload? Use the backdoor — open <strong>https://{{ settings.get('server_ip', 'SERVER_IP') }}:5001</strong> and upload from the TAK Server page there (skips proxy, no timeout).</span></div>
 <div class="upload-hint">
 {% if 'ubuntu' in settings.get('os_type', '') %}
 <strong style="color:var(--text-secondary)">Ubuntu — upload these files from tak.gov:</strong><br>
@@ -8593,12 +8868,14 @@ function uploadFile(file){
         delete window['xhr_'+id];
         const bar=document.getElementById(id+'-bar');const pc=document.getElementById(id+'-pct');bar.style.width='100%';
         var cb=document.getElementById(id+'-cancel');if(cb)cb.remove();
-        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn)}
+        if(xhr.status===200){const d=JSON.parse(xhr.responseText);bar.style.background='var(--green)';pc.style.color='var(--green)';if(d.package)uploadedFiles.package=d.package;if(d.gpg_key)uploadedFiles.gpg_key=d.gpg_key;if(d.policy)uploadedFiles.policy=d.policy;var rBtn=document.createElement('span');rBtn.textContent=' \u2717';rBtn.style.cssText='color:var(--red);cursor:pointer;margin-left:8px';rBtn.title='Remove';rBtn.onclick=function(ev){ev.stopPropagation();removeFile(file.name,id)};pc.textContent='\u2713 ';pc.appendChild(rBtn);updateUploadSummary()}
         else{bar.style.background='var(--red)';pc.textContent='\u2717';pc.style.color='var(--red)'}
         uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()
     };
     xhr.onerror=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='\u2717';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
     xhr.onabort=()=>{delete window['xhr_'+id];uploadsInProgress--};
+    xhr.ontimeout=()=>{delete window['xhr_'+id];document.getElementById(id+'-bar').style.background='var(--red)';document.getElementById(id+'-pct').textContent='Timeout';uploadsInProgress--;if(uploadsInProgress===0)updateUploadSummary()};
+    xhr.timeout=1800000;
     xhr.open('POST','/api/upload/takserver');xhr.send(fd);
 }
 

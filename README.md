@@ -108,7 +108,7 @@ start.sh                    ← One CLI command to launch everything
 | Service | Port | Description |
 |---------|------|-------------|
 | TAK-infra Console | 5001 | Management web UI |
-| TAK Server | 8089 | ATAK/TAKAware connections (TLS) |
+| TAK Server | 8089 | TAK client connections (TLS) |
 | TAK Server | 8443 | WebGUI (cert auth) |
 | TAK Server | 8446 | WebGUI (Let's Encrypt, password auth) |
 | Authentik | 9090 | Identity provider |
@@ -119,7 +119,7 @@ start.sh                    ← One CLI command to launch everything
 
 **IP Address Mode** — Self-signed certificate, works anywhere (field deployments, no DNS needed)
 
-**FQDN Mode** — Caddy + Let's Encrypt for proper SSL. Required for ATAK Android QR enrollment. Can upgrade from IP mode through the web console without SSH.
+**FQDN Mode** — Caddy + Let's Encrypt for proper SSL. Required for TAK client QR enrollment. Can upgrade from IP mode through the web console without SSH.
 
 ## QR Code Enrollment
 

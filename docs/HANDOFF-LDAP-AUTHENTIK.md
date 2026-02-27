@@ -33,7 +33,7 @@
 
 ### What To Do Next (This Session)
 1. Fresh VPS rebuild to verify end-to-end flow clean (tear down and rebuild)
-2. After rebuild: enroll ATAK client, verify LDAP user auth end-to-end (QR → ATAK connect → confirm no disconnect when webadmin logs into 8446)
+2. After rebuild: enroll a TAK client, verify LDAP user auth end-to-end (QR → client connect → confirm no disconnect when webadmin logs into 8446)
 3. Build two-server deployment support in TAK Server module
 
 ### What's Next / Work in Progress
@@ -109,14 +109,14 @@ curl -s "http://127.0.0.1:9090/api/v3/flows/instances/?slug=ldap-authentication-
 │  - CoreConfig.xml → <auth default="ldap">          │
 │  - Service account: adm_ldapservice                │
 │  - User auth: cn={username},ou=users,dc=takldap    │
-│  - Ports: 8089 (TLS/ATAK), 8443 (cert), 8446 (pw) │
+│  - Ports: 8089 (TLS / TAK clients), 8443 (cert), 8446 (pw) │
 └───────────────────────────────────────────────────┘
 ```
 
-### Data Flow: User Authentication via ATAK
+### Data Flow: User Authentication via TAK client
 
 1. User created in TAK Portal → Authentik API creates user
-2. User scans QR code in ATAK → ATAK connects to TAK Server :8089
+2. User scans QR code in TAK client → client connects to TAK Server :8089
 3. TAK Server authenticates via LDAP (`LdapAuthenticator.java`)
 4. TAK Server binds as service account → `cn=adm_ldapservice,ou=users,dc=takldap`
 5. TAK Server binds as user → `cn={username},ou=users,dc=takldap` with user's password
@@ -196,7 +196,7 @@ curl -s "http://127.0.0.1:9090/api/v3/flows/instances/?slug=ldap-authentication-
 
 - **Decision**: The `<auth>` block uses `<ldap .../>` before `<File .../>` (not the other way around)
 - **Why**: Matches the known-good CoreConfig from a working deployment. Reversing the order caused issues.
-- **Critical attributes**: `x509groups="true"`, `x509useGroupCache="true"`, `x509useGroupCacheDefaultActive="true"`, `updateinterval="60"` — without these, the admin GUI is slow, and ATAK clients get disconnected when webadmin logs into 8446
+- **Critical attributes**: `x509groups="true"`, `x509useGroupCache="true"`, `x509useGroupCacheDefaultActive="true"`, `updateinterval="60"` — without these, the admin GUI is slow, and TAK clients get disconnected when webadmin logs into 8446
 
 ### 4.8 CoreConfig LDAP detection
 
@@ -342,7 +342,7 @@ cd ~/infra-TAK && sudo bash start.sh
 | Port 389 not listening | LDAP container not started or crashed | `cd ~/authentik && docker compose up -d ldap && docker logs authentik-ldap-1` |
 | 8446 WebGUI login fails after LDAP | webadmin not in Authentik/LDAP | Run "Connect TAK Server to LDAP" again (creates webadmin in Authentik) |
 | CoreConfig shows no LDAP after Connect says success | Old bug: substring check was wrong | Fixed: now checks for `adm_ldapservice` substring. Verify: `grep -q adm_ldapservice /opt/tak/CoreConfig.xml && echo OK` |
-| ATAK clients kicked when webadmin logs into 8446 | CoreConfig missing x509 cache attributes | Fixed: auth block includes `x509groups`, `x509useGroupCache`, `x509useGroupCacheDefaultActive`, `updateinterval="60"` |
+| TAK clients kicked when webadmin logs into 8446 | CoreConfig missing x509 cache attributes | Fixed: auth block includes `x509groups`, `x509useGroupCache`, `x509useGroupCacheDefaultActive`, `updateinterval="60"` |
 
 ---
 
@@ -397,7 +397,7 @@ grep -q 'adm_ldapservice' /opt/tak/CoreConfig.xml && echo OK || echo FAIL
 ### SHORT-TERM (Next)
 - **Two-server TAK Server deployment**: Single UI flow — user picks 1-server or 2-server, uploads core + database `.deb` files, provides DB server IP + SSH credentials. infra-TAK SSHes into Server 1 (DB) to install `takserver-database`, then installs `takserver-core` locally on Server 2, patches CoreConfig `<connection>` to remote DB. (Server 1 = DB, Server 2 = Core per official TAK Server guide numbering.)
 - **Cloudflare Tunnel module**: For travel NUC/Pi deployments — install `cloudflared`, configure tunnel to TAK ports, stable FQDN from any network, no VPN required on clients
-- **Verify end-to-end on fresh VPS**: Enroll ATAK, confirm no disconnect when webadmin uses 8446
+- **Verify end-to-end on fresh VPS**: Enroll a TAK client, confirm no disconnect when webadmin uses 8446
 
 ### MEDIUM-TERM
 
