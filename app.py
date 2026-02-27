@@ -7197,8 +7197,6 @@ def _ensure_authentik_ldap_service_account():
 
 def _apply_ldap_to_coreconfig():
     """Patch CoreConfig.xml with LDAP auth and restart TAK Server. Returns (success, message)."""
-    import re
-    import shutil
     coreconfig_path = '/opt/tak/CoreConfig.xml'
     env_path = os.path.expanduser('~/authentik/.env')
     if not os.path.exists(coreconfig_path):
@@ -7213,67 +7211,53 @@ def _apply_ldap_to_coreconfig():
                 break
     if not ldap_pass:
         return False, 'LDAP service password not found in Authentik .env'
+    # Read current CoreConfig
+    with open(coreconfig_path, 'r') as f:
+        original = f.read()
+    if _coreconfig_has_ldap():
+        return True, 'CoreConfig already has LDAP'
+    # Backup
     backup_path = coreconfig_path + '.pre-ldap.bak'
     if not os.path.exists(backup_path):
-        shutil.copy2(coreconfig_path, backup_path)
-    with open(coreconfig_path, 'r') as f:
-        config_content = f.read()
-    # CRITICAL: Structure and order must match known-good CoreConfig (ldap then File; x509* for cache).
-    # x509groups + x509useGroupCache + updateinterval=60 prevent slow admin GUI and ATAK disconnects.
-    auth_block = (
-        '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
-        '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" style="DS" ldapSecurityType="simple" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
-        + ldap_pass
-        + '" groupObjectClass="group" userObjectClass="user" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" matchGroupInChain="true" roleAttribute="memberOf" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
-        '        <File location="UserAuthenticationFile.xml"/>\n'
-        '    </auth>'
-    )
-    # Match <auth>...</auth> (any indentation/casing; TAK Server may use 2 or 4 spaces or tabs)
-    new_content = re.sub(r'<auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL | re.IGNORECASE)
-    if new_content == config_content:
-        # Regex didn't match — try fallback: find <auth ...> and matching </auth> by span
-        start = config_content.lower().find('<auth')
-        if start >= 0:
-            end_tag = config_content.lower().find('</auth>', start)
-            if end_tag >= 0:
-                end = end_tag + len('</auth>')
-                new_content = config_content[:start] + auth_block + config_content[end:]
-        if new_content == config_content:
-            if _coreconfig_has_ldap():
-                return True, 'CoreConfig already has LDAP'
-            return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
-    # Write patch to app dir (we have write access), then sudo cp to /opt/tak
+        subprocess.run(['sudo', 'cp', coreconfig_path, backup_path], capture_output=True, timeout=10)
+    # Build the replacement auth block (matches known-good CoreConfig exactly)
+    auth_block = '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
+    auth_block += '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" style="DS" ldapSecurityType="simple" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="' + ldap_pass + '" groupObjectClass="group" userObjectClass="user" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" matchGroupInChain="true" roleAttribute="memberOf" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
+    auth_block += '        <File location="UserAuthenticationFile.xml"/>\n'
+    auth_block += '    </auth>'
+    # Sanity check the block we built
+    if 'serviceAccountDN="cn=adm_ldapservice"' not in auth_block:
+        return False, 'BUG: auth_block missing serviceAccountDN'
+    # Find <auth and </auth> in the file (case-insensitive, no regex)
+    lower = original.lower()
+    start = lower.find('<auth')
+    if start < 0:
+        return False, 'No <auth> tag found in CoreConfig.xml'
+    end_tag = lower.find('</auth>', start)
+    if end_tag < 0:
+        return False, 'No </auth> closing tag found in CoreConfig.xml'
+    end = end_tag + len('</auth>')
+    # Splice: everything before <auth> + our block + everything after </auth>
+    patched = original[:start] + auth_block + original[end:]
+    # Sanity check the patched content
+    if 'serviceAccountDN="cn=adm_ldapservice"' not in patched:
+        return False, f'BUG: patched content missing LDAP. start={start} end={end} auth_block_len={len(auth_block)}'
+    # Write to a temp file we own, then sudo cp to /opt/tak
     patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
-    try:
-        with open(patch_path, 'w') as f:
-            f.write(new_content)
-    except Exception as e:
-        return False, f'Could not write patch file: {e}'
-    # Verify our patch file has the LDAP block before copying
-    if 'serviceAccountDN="cn=adm_ldapservice"' not in new_content:
-        return False, 'Internal error: patch content missing LDAP block'
-    patch_abs = os.path.abspath(patch_path)
-    r = subprocess.run(['sudo', 'cp', patch_abs, coreconfig_path], capture_output=True, text=True, timeout=10)
+    with open(patch_path, 'w') as f:
+        f.write(patched)
+    r = subprocess.run(['sudo', 'cp', os.path.abspath(patch_path), coreconfig_path], capture_output=True, text=True, timeout=10)
     if r.returncode != 0:
-        return False, f'Could not copy to CoreConfig: {r.stderr.strip()[:120]}. Apply manually: sudo cp {patch_abs} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
-    # Verify the file at destination has the LDAP block
-    rv = subprocess.run(
-        ['sudo', 'grep', '-q', 'serviceAccountDN="cn=adm_ldapservice"', coreconfig_path],
-        capture_output=True, timeout=5)
-    if rv.returncode != 0:
-        return False, f'Copy did not persist (path/permission?). Apply manually: sudo cp {patch_abs} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
-    r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
+        return False, f'sudo cp failed: {r.stderr.strip()[:200]}. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    # Verify the destination file
+    check = subprocess.run(['grep', '-c', 'serviceAccountDN', coreconfig_path], capture_output=True, text=True, timeout=5)
+    if check.returncode != 0 or check.stdout.strip() == '0':
+        return False, f'File not updated. Run manually: sudo cp {os.path.abspath(patch_path)} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    # Restart TAK Server
+    r = subprocess.run('sudo systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
-    # Verify LDAP bind works by checking outpost logs for successful auth
-    time.sleep(5)
-    verify = subprocess.run(
-        'docker logs authentik-ldap-1 --since 30s 2>&1 | grep -c "authenticated"',
-        shell=True, capture_output=True, text=True, timeout=10)
-    auth_count = int(verify.stdout.strip()) if verify.stdout.strip().isdigit() else 0
-    if auth_count > 0:
-        return True, f'LDAP connected and verified — TAK Server is authenticating successfully ({auth_count} binds confirmed). Verify: grep -q \'serviceAccountDN="cn=adm_ldapservice"\' /opt/tak/CoreConfig.xml && echo OK'
-    return True, 'LDAP connected; TAK Server restarted. Verify: grep -q \'serviceAccountDN="cn=adm_ldapservice"\' /opt/tak/CoreConfig.xml && echo OK'
+    return True, 'LDAP connected — CoreConfig patched and TAK Server restarted.'
 
 def _ensure_authentik_webadmin():
     """Ensure webadmin user exists in Authentik with path=users for 8446 LDAP login.
