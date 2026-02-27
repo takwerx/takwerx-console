@@ -698,18 +698,10 @@ def generate_caddyfile(settings=None):
     ak = modules.get('authentik', {})
     nodered = modules.get('nodered', {})
     # infra-TAK (login & platform) — infratak.domain (behind Authentik when Authentik is installed)
-    # /login and / go to app without forward_auth so console password works after pull/restart
+    # Only /login* skips forward_auth so console password / backdoor works; / and all other paths go through Authentik
     lines.append(f"infratak.{domain} {{")
     if ak.get('installed'):
         lines.append(f"    route /login* {{")
-        lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
-        lines.append(f"            transport http {{")
-        lines.append(f"                tls")
-        lines.append(f"                tls_insecure_skip_verify")
-        lines.append(f"            }}")
-        lines.append(f"        }}")
-        lines.append(f"    }}")
-        lines.append(f"    route / {{")
         lines.append(f"        reverse_proxy 127.0.0.1:5001 {{")
         lines.append(f"            transport http {{")
         lines.append(f"                tls")
