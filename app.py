@@ -7242,32 +7242,26 @@ def _apply_ldap_to_coreconfig():
             if _coreconfig_has_ldap():
                 return True, 'CoreConfig already has LDAP'
             return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
-    # Write via temp + sudo cp so we don't depend on app having write permission to /opt/tak
-    import tempfile
-    fd, tmp = tempfile.mkstemp(suffix='.xml', prefix='coreconfig-')
+    # Write patch to app dir (we have write access), then sudo cp to /opt/tak
+    patch_path = os.path.join(BASE_DIR, 'CoreConfig.ldap-patch.xml')
     try:
-        os.write(fd, new_content.encode('utf-8'))
-        os.close(fd)
-        fd = None
-        r = subprocess.run(['sudo', 'cp', tmp, coreconfig_path], capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
-            return False, f'Could not write CoreConfig: {r.stderr.strip()[:120]}'
-    finally:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except Exception:
-                pass
-        try:
-            os.unlink(tmp)
-        except Exception:
-            pass
-    # Verify the file actually has the LDAP block (use sudo grep so we see same file root wrote)
+        with open(patch_path, 'w') as f:
+            f.write(new_content)
+    except Exception as e:
+        return False, f'Could not write patch file: {e}'
+    # Verify our patch file has the LDAP block before copying
+    if 'serviceAccountDN="cn=adm_ldapservice"' not in new_content:
+        return False, 'Internal error: patch content missing LDAP block'
+    patch_abs = os.path.abspath(patch_path)
+    r = subprocess.run(['sudo', 'cp', patch_abs, coreconfig_path], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        return False, f'Could not copy to CoreConfig: {r.stderr.strip()[:120]}. Apply manually: sudo cp {patch_abs} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
+    # Verify the file at destination has the LDAP block
     rv = subprocess.run(
         ['sudo', 'grep', '-q', 'serviceAccountDN="cn=adm_ldapservice"', coreconfig_path],
         capture_output=True, timeout=5)
     if rv.returncode != 0:
-        return False, 'CoreConfig write did not persist. Run: sudo grep serviceAccountDN /opt/tak/CoreConfig.xml'
+        return False, f'Copy did not persist (path/permission?). Apply manually: sudo cp {patch_abs} /opt/tak/CoreConfig.xml && sudo systemctl restart takserver'
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'

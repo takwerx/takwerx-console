@@ -1,5 +1,6 @@
 .venv/
 .config/
+CoreConfig.ldap-patch.xml
 uploads/*.deb
 uploads/*.rpm
 __pycache__/
