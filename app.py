@@ -5967,10 +5967,10 @@ entries:
                     '    </auth>'
                 )
 
-                # Replace auth block using regex
+                # Replace auth block using regex (match <auth>...</auth> regardless of indentation)
                 import re
                 new_content = re.sub(
-                    r'    <auth[^>]*>.*?</auth>',
+                    r'<auth[^>]*>.*?</auth>',
                     auth_block,
                     config_content,
                     flags=re.DOTALL
@@ -5992,12 +5992,15 @@ entries:
                     else:
                         plog(f"\u26a0 TAK Server restart issue: {r.stderr.strip()[:100]}")
                 else:
-                    plog("\u2713 CoreConfig.xml already has LDAP auth configured")
+                    if _coreconfig_has_ldap():
+                        plog("\u2713 CoreConfig.xml already has LDAP auth configured")
+                    else:
+                        plog("\u26a0 CoreConfig <auth> block not found or format not recognized — use Connect TAK Server to LDAP after deploy")
             else:
                 plog("\u26a0 LDAP service password not found, skipping CoreConfig patch")
         else:
             plog("  ℹ TAK Server not installed — skipping CoreConfig (OK for MediaMTX-only or standalone Authentik)")
-            plog("  Deploy TAK Server later, then use Update config & reconnect to add LDAP")
+            plog("  Deploy TAK Server later, then use Connect TAK Server to LDAP to add LDAP")
 
         # Step 11/12: Create admin group and webadmin user in Authentik
         plog("")
@@ -7254,9 +7257,13 @@ def _apply_ldap_to_coreconfig():
         ' nameAttr="CN" roleAttribute="memberOf" adminGroup="ROLE_ADMIN"/>\n'
         '    </auth>'
     )
-    new_content = re.sub(r'    <auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL)
+    # Match <auth>...</auth> (any indentation; TAK Server may use 2 or 4 spaces or tabs)
+    new_content = re.sub(r'<auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL)
     if new_content == config_content:
-        return True, 'CoreConfig already has LDAP'
+        # Regex didn't match — either already has LDAP or file format differs
+        if _coreconfig_has_ldap():
+            return True, 'CoreConfig already has LDAP'
+        return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
     with open(coreconfig_path, 'w') as f:
         f.write(new_content)
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
