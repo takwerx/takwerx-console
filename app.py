@@ -3072,7 +3072,7 @@ def _wait_for_authentik_api(ak_url, ak_headers, max_attempts=90, plog=None):
 def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     """Create recovery flow + stages + bindings and link to default authentication flow.
     Matches official Authentik blueprint: Identification -> Email -> Prompt (new pw) -> User Write -> User Login.
-    Non-destructive: only adds missing stages/bindings, never deletes existing ones.
+    Fetches ALL bindings and filters client-side (the flow__pk server filter is unreliable).
     Returns (success: bool, message: str, recovery_slug: str|None)."""
     import urllib.request as _req
     import urllib.error
@@ -3094,8 +3094,10 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='PATCH')
         resp = _req.urlopen(r, timeout=15)
         return json.loads(resp.read().decode())
+    def _api_delete(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers, method='DELETE')
+        _req.urlopen(r, timeout=15)
     def _find_stage(api_path, name):
-        """Find a stage by exact name match."""
         results = _api_get(f'{api_path}?search={_req.quote(name)}').get('results', [])
         for s in results:
             if s.get('name') == name:
@@ -3119,7 +3121,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
     try:
         recovery_flow_slug = 'default-password-recovery'
 
-        # 1) Get or create recovery flow with authentication=none so unauthenticated users can use it
+        # 1) Get or create recovery flow
         recovery_flows = _api_get('flows/instances/?designation=recovery').get('results', [])
         recovery_flow_pk = None
         for f in recovery_flows:
@@ -3141,22 +3143,8 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             except Exception:
                 pass
 
-        # 2) Get existing bindings for recovery flow -- build set of already-bound stage PKs and names
-        existing_bindings = _api_get(f'flows/bindings/?flow__pk={recovery_flow_pk}&ordering=order').get('results', [])
-        bound_stage_pks = set()
-        bound_stage_names = set()
-        for b in existing_bindings:
-            stage_obj = b.get('stage_obj') or {}
-            name = stage_obj.get('name', '')
-            pk = stage_obj.get('pk', '')
-            bound_stage_names.add(name)
-            if pk:
-                bound_stage_pks.add(pk)
+        # 2) Create all required stages
 
-        # 3) Create all required stages
-
-        # 3a) Identification stage -- reuse Authentik's default (already has email+username)
-        #     Creating a separate one fails on some versions due to user_fields validation.
         id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
         if not id_stage_pk:
             id_stage_pk = _find_stage('stages/identification/', 'Recovery Identification')
@@ -3165,7 +3153,6 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             if all_id_stages:
                 id_stage_pk = all_id_stages[0]['pk']
 
-        # 3b) Email stage (sends recovery link)
         email_stage_pk = _find_or_create_stage('stages/email/', 'Recovery Email', {
             'use_global_settings': True,
             'template': 'email/password_reset.html',
@@ -3181,7 +3168,6 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             except Exception:
                 pass
 
-        # 3c) Prompt fields for new password
         def _find_or_create_prompt(name, field_key, label, order):
             results = _api_get(f'stages/prompt/prompts/?search={_req.quote(name)}').get('results', [])
             for p in results:
@@ -3203,7 +3189,6 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
         pw_field_pk = _find_or_create_prompt('recovery-field-password', 'password', 'Password', 0)
         pw_repeat_field_pk = _find_or_create_prompt('recovery-field-password-repeat', 'password_repeat', 'Password (repeat)', 1)
 
-        # 3d) Prompt stage (collects new password from user)
         prompt_stage_pk = _find_stage('stages/prompt/stages/', 'Recovery Password Change')
         if not prompt_stage_pk:
             try:
@@ -3222,14 +3207,39 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             except Exception:
                 pass
 
-        # 3e) User Write stage (saves the new password)
         user_write_pk = _find_or_create_stage('stages/user_write/', 'Recovery User Write',
             {'user_creation_mode': 'never_create'})
 
-        # 3f) User Login stage (logs user in after reset)
         user_login_pk = _find_or_create_stage('stages/user_login/', 'Recovery User Login')
 
-        # 4) Bind only MISSING stages to recovery flow (never delete, only add)
+        # 3) Fetch ALL bindings, filter client-side by target == recovery flow PK.
+        #    The server-side flow__pk filter is unreliable and returns bindings from other flows.
+        all_bindings = []
+        page = 1
+        while True:
+            data = _api_get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+            all_bindings.extend(data.get('results', []))
+            if not data.get('pagination', {}).get('next'):
+                break
+            page += 1
+
+        recovery_bindings = [b for b in all_bindings if str(b.get('target')) == str(recovery_flow_pk)]
+
+        desired_stage_pks = set()
+        for pk in [id_stage_pk, email_stage_pk, prompt_stage_pk, user_write_pk, user_login_pk]:
+            if pk:
+                desired_stage_pks.add(str(pk))
+
+        # 4) Delete any binding on the recovery flow whose stage is NOT one of our 5 desired stages
+        for b in recovery_bindings:
+            if str(b.get('stage', '')) not in desired_stage_pks:
+                try:
+                    _api_delete(f'flows/bindings/{b["pk"]}/')
+                except Exception:
+                    pass
+
+        # 5) Create missing bindings
+        already_bound = {str(b.get('stage')) for b in recovery_bindings}
         desired_bindings = [
             (10, id_stage_pk),
             (20, email_stage_pk),
@@ -3238,7 +3248,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
             (100, user_login_pk),
         ]
         for order, stage_pk in desired_bindings:
-            if not stage_pk or stage_pk in bound_stage_pks:
+            if not stage_pk or str(stage_pk) in already_bound:
                 continue
             try:
                 _api_post('flows/bindings/', {
@@ -3251,8 +3261,7 @@ def _ensure_authentik_recovery_flow(ak_url, ak_headers):
                 else:
                     raise
 
-        # 5) Link recovery flow to the default-authentication-identification stage
-        #    Find it directly by name -- don't iterate bindings (avoids hitting wrong stage)
+        # 6) Link recovery flow to the default-authentication-identification stage
         auth_id_stage_pk = _find_stage('stages/identification/', 'default-authentication-identification')
         if not auth_id_stage_pk:
             all_id = _api_get('stages/identification/').get('results', [])
