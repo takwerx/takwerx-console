@@ -7975,7 +7975,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div id="server-log" style="background:#0c0f1a;border:1px solid var(--border);border-radius:12px;padding:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);max-height:400px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">Loading log...</div>
 {% else %}
 <div class="section-title">Deploy TAK Server</div>
-<div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="document.getElementById('file-input').click()">
+<div class="upload-area" id="upload-area" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" onclick="var i=document.getElementById('file-input');i.value='';i.click()">
 <div class="upload-icon">📦</div><div class="upload-text">Drop your TAK Server files here</div>
 <div class="upload-hint">
 {% if 'ubuntu' in settings.get('os_type', '') %}
@@ -7998,7 +7998,7 @@ Required: <span style="color:var(--cyan)">.deb</span> or <span style="color:var(
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:20px">
 <div id="upload-files-list" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text-secondary)"></div>
 <div id="add-more-area" style="margin-top:16px;text-align:center">
-<button onclick="document.getElementById('file-input-more').click()" style="padding:8px 20px;background:transparent;color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">+ Add more files</button>
+<button onclick="var i=document.getElementById('file-input-more');i.value='';i.click()" style="padding:8px 20px;background:transparent;color:var(--accent);border:1px solid var(--border);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer">+ Add more files</button>
 <input type="file" id="file-input-more" style="display:none" multiple {% if 'ubuntu' in settings.get('os_type', '') %}accept=".deb,.key,.pol"{% elif 'rocky' in settings.get('os_type', '') or 'rhel' in settings.get('os_type', '') %}accept=".rpm,.key"{% else %}accept=".deb,.rpm,.key,.pol"{% endif %} onchange="handleAddMore(event)">
 </div>
 <div id="deploy-btn-area" style="margin-top:20px;text-align:center;display:none">
