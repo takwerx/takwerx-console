@@ -1,5 +1,74 @@
 # infra-TAK Technical Handoff Document
 
+## 0. Current Session State (Last Updated: 2026-02-27)
+
+### What's Deployed on the Server Right Now
+- **Caddy** — running, TLS working for all subdomains
+- **Authentik** — running (server, worker, postgres, redis, LDAP outpost all healthy)
+- **TAK Server** — running (systemd), CoreConfig.xml HAS the LDAP block patched in
+- **TAK Portal** — running (Docker, healthy)
+- **Email Relay** — running, SMTP configured in Authentik, password recovery flow works end-to-end
+
+### What Works
+- All services deploy and run
+- Authentik SSO via Caddy forward_auth (infratak, takportal, nodered, mediamtx subdomains)
+- Password recovery flow (forgot password → email → reset → login)
+- Service account LDAP bind (`adm_ldapservice`) — works from cache
+- TAK Server 8443 (cert auth) and 8446 (password auth with file-based users)
+- TAK Portal user creation → Authentik user creation
+- "LDAP Connected to Authentik" status banner shows on TAK Server page
+
+### What's Broken — THE BLOCKER
+**ATAK users cannot authenticate via LDAP.** When a user created in TAK Portal tries to connect via ATAK (scans QR code), TAK Server tries to authenticate them via LDAP and gets `error code 49 - Invalid Credentials`.
+
+**Root cause**: The `ldap-authentication-flow` in the Authentik blueprint has `authentication: require_outpost`. When the LDAP outpost tries to execute this flow for a real user bind, Authentik rejects it with "Flow does not apply to current user." The service account only works because it was cached during outpost startup.
+
+**LDAP outpost logs show**:
+```
+{"bindDN":"cn=ajjohanssoncacor,ou=users,dc=takldap","error":"Flow does not apply to current user.","event":"failed to execute flow"}
+```
+
+**TAK Server logs show**:
+```
+javax.naming.AuthenticationException: [LDAP: error code 49 - Invalid Credentials]
+  at com.bbn.marti.groups.LdapAuthenticator.connect(LdapAuthenticator.java:328)
+```
+
+### What To Do Next
+1. **In `app.py` (~line 5660)**: Change `authentication: require_outpost` to `authentication: none` in the `ldap-authentication-flow` blueprint YAML
+2. **In `_ensure_authentik_ldap_service_account()` (~line 7003)**: Add an API call to PATCH the existing `ldap-authentication-flow` to `authentication: none` (so it fixes existing deployments without redeploying Authentik)
+3. **Restart the LDAP outpost** after the flow change
+4. **Test with a real user** (not just the service account) — create user in TAK Portal, scan QR in ATAK, verify TAK Server authenticates via LDAP
+5. After LDAP works: deploy CloudTAK, then Node-RED, then MediaMTX (in that order)
+
+### Things Already Tried That Didn't Fix It
+- Changing `bind_mode` from `cached` to `direct` — same error
+- Changing `search_mode` from `cached` to `direct` — same error  
+- PATCH `authentication: none` on the flow via API alone (without restarting outpost) — same error
+- Force-recreating the LDAP outpost — same error
+- The API PATCH may have succeeded but the outpost was returning cached flow data; the fix likely needs BOTH the API change AND a full outpost restart together
+
+### Server Access
+```bash
+# Pull latest code and restart console
+cd ~/infra-TAK && git pull && sudo systemctl restart takwerx-console
+
+# Revert CoreConfig to pre-LDAP state (if LDAP breaks 8446 login)
+sudo cp /opt/tak/CoreConfig.xml.pre-ldap.bak /opt/tak/CoreConfig.xml && sudo systemctl restart takserver
+
+# Check LDAP outpost logs
+docker logs authentik-ldap-1 --since 2m 2>&1
+
+# Check LDAP outpost config
+TOKEN=$(grep AUTHENTIK_BOOTSTRAP_TOKEN ~/authentik/.env | cut -d= -f2)
+curl -s "http://127.0.0.1:9090/api/v3/outposts/instances/?search=LDAP" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# Check LDAP flow authentication setting
+curl -s "http://127.0.0.1:9090/api/v3/flows/instances/?slug=ldap-authentication-flow" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep authentication
+```
+
+---
+
 ## 1. Project Overview
 
 | Field | Value |
