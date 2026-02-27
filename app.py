@@ -3551,10 +3551,8 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
             mtx_domain = s.get('mediamtx_domain', f'stream.{fqdn}')
             if '.' not in mtx_domain:
                 mtx_domain = f'{mtx_domain}.{fqdn}'
-            mtx_installed = (os.path.exists(os.path.expanduser('~/mediamtx-webeditor/mediamtx_config_editor.py')) or
-                detect_modules().get('mediamtx', {}).get('installed'))
-            if mtx_installed:
-                entries.append(('MediaMTX', 'stream', f'https://{mtx_domain}'))
+            # Always add MediaMTX so it's ready when MediaMTX is deployed later
+            entries.append(('MediaMTX', 'stream', f'https://{mtx_domain}'))
         except Exception:
             pass
         provider_pks = []
@@ -6502,13 +6500,10 @@ entries:
 
                     plog(f"  ✓ Forward auth ready for takportal.{fqdn}")
 
-                    # If Node-RED is installed, create Node-RED app in Authentik (same as TAK Portal)
-                    nodered_installed = (os.path.exists(os.path.expanduser('~/node-red/docker-compose.yml')) or
-                        os.path.exists(os.path.expanduser('~/node-red/settings.js')) or os.path.exists('/opt/nodered'))
-                    if nodered_installed:
-                        plog("")
-                        plog("  Configuring Authentik for Node-RED...")
-                        _ensure_authentik_nodered_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
+                    # Create Node-RED app in Authentik (so it's ready when Node-RED is deployed later)
+                    plog("")
+                    plog("  Configuring Authentik for Node-RED...")
+                    _ensure_authentik_nodered_app(fqdn, ak_token, plog, flow_pk=flow_pk, inv_flow_pk=inv_flow_pk)
                     # infra-TAK console (infratak + console subdomains) behind Authentik — reuse same flows, no second fetch
                     plog("")
                     plog("  Configuring Authentik for infra-TAK Console...")
