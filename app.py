@@ -7043,7 +7043,7 @@ def _ensure_ldap_flow_authentication_none():
         default_flow = next((f for f in auth_flows if f.get('slug') == 'default-authentication-flow'), None)
 
         if ldap_flow:
-            _patch(f'flows/instances/{ldap_flow["pk"]}/', {'authentication': 'none'})
+            _patch('flows/instances/ldap-authentication-flow/', {'authentication': 'none'})
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
