@@ -7228,13 +7228,13 @@ def _apply_ldap_to_coreconfig():
         '        <File location="UserAuthenticationFile.xml"/>\n'
         '    </auth>'
     )
-    # Match <auth>...</auth> (any indentation; TAK Server may use 2 or 4 spaces or tabs)
-    new_content = re.sub(r'<auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL)
+    # Match <auth>...</auth> (any indentation/casing; TAK Server may use 2 or 4 spaces or tabs)
+    new_content = re.sub(r'<auth[^>]*>.*?</auth>', auth_block, config_content, flags=re.DOTALL | re.IGNORECASE)
     if new_content == config_content:
         # Regex didn't match — try fallback: find <auth ...> and matching </auth> by span
-        start = config_content.find('<auth')
+        start = config_content.lower().find('<auth')
         if start >= 0:
-            end_tag = config_content.find('</auth>', start)
+            end_tag = config_content.lower().find('</auth>', start)
             if end_tag >= 0:
                 end = end_tag + len('</auth>')
                 new_content = config_content[:start] + auth_block + config_content[end:]
@@ -7242,8 +7242,30 @@ def _apply_ldap_to_coreconfig():
             if _coreconfig_has_ldap():
                 return True, 'CoreConfig already has LDAP'
             return False, 'CoreConfig <auth> block not found or format not recognized. See /opt/tak/CoreConfig.xml'
-    with open(coreconfig_path, 'w') as f:
-        f.write(new_content)
+    # Write via temp + sudo cp so we don't depend on app having write permission to /opt/tak
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix='.xml', prefix='coreconfig-')
+    try:
+        os.write(fd, new_content.encode('utf-8'))
+        os.close(fd)
+        fd = None
+        r = subprocess.run(['sudo', 'cp', tmp, coreconfig_path], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return False, f'Could not write CoreConfig: {r.stderr.strip()[:120]}'
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+    # Verify the file actually has the LDAP block
+    with open(coreconfig_path, 'r') as f:
+        if 'serviceAccountDN="cn=adm_ldapservice"' not in f.read():
+            return False, 'CoreConfig write did not persist (check permissions or path).'
     r = subprocess.run('systemctl restart takserver 2>&1', shell=True, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f'CoreConfig patched but TAK Server restart failed: {r.stderr.strip()[:120]}'
