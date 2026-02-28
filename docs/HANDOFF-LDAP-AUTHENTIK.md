@@ -21,15 +21,14 @@
 - TAK Portal user creation -> Authentik user creation -> QR enrollment -> TAK client connects with no issues
 - **No user-profile.pref popup** -- fixed by stripping extra LDAP attributes (style, ldapSecurityType, groupObjectClass, userObjectClass, matchGroupInChain, roleAttribute)
 - **Authentik SMTP auto-configuration** -- Email Relay deploy auto-configures Postfix inet_interfaces, mynetworks, firewall rules (ufw/firewalld) for Docker-to-host port 25
-- **App access policies** -- auto-created on Authentik deploy: "Allow authentik Admins" (group membership) bound to admin-only apps; "Allow MediaMTX users" (expression policy for vid_* groups) bound to MediaMTX; TAK Portal open to all authenticated users
+- **App access policies** -- auto-created on Authentik deploy: "Allow authentik Admins" bound to admin-only apps (infra-TAK, Node-RED, LDAP). TAK Portal and MediaMTX have no binding = visible to all authenticated users. At authentik.fqdn, admins see all apps; regular users see only TAK Portal and MediaMTX.
 - **"TAK clients" terminology** -- universal across UI, logs, and docs (no more "ATAK enrollment")
 
 ### What's New in This Build (Changes Since Last Session)
 1. **Authentik SMTP/firewall automation** -- `_configure_authentik_smtp_and_recovery` now auto-configures Postfix `inet_interfaces = all`, `mynetworks` with Docker subnets (172.16.0.0/12), and UFW/firewalld rules for port 25 on deploy
 2. **App access policies** -- `_ensure_app_access_policies` creates and binds policies automatically:
-   - `Allow authentik Admins` (group membership) -> infra-TAK, Node-RED, LDAP
-   - `Allow MediaMTX users` (expression: admins OR vid_admin/vid_private/vid_public) -> MediaMTX
-   - TAK Portal left unbound (all authenticated users see it)
+   - `Allow authentik Admins` (group membership) -> infra-TAK, Node-RED, LDAP (admin-only; only these users see these apps at authentik.fqdn)
+   - TAK Portal and MediaMTX (stream) have no policy binding -> visible to all authenticated users. Any existing "Allow MediaMTX users" binding is removed so stream is user-visible.
 3. **MediaMTX LDAP overlay** -- `mediamtx_ldap_overlay.py` patches vanilla editor at deploy time when Authentik detected: Authentik header auth, Stream Access page at /stream-access, sidebar injection. NOT YET TESTED.
 4. **LDAP stanza cleanup** -- Stripped `style="DS"`, `ldapSecurityType="simple"`, `groupObjectClass`, `userObjectClass`, `matchGroupInChain`, `roleAttribute` from CoreConfig LDAP block. Kept `adminGroup="ROLE_ADMIN"` (required for admin console access). Matches TAK Portal reference stanza. Fixed user-profile.pref phantom popup.
 5. **MediaMTX deploy bugfix** -- Clone dir was deleted before editor file was copied; moved cleanup after copy+patching
@@ -85,6 +84,10 @@ curl -s "http://127.0.0.1:9090/api/v3/outposts/instances/?search=LDAP" -H "Autho
 # Check LDAP flow authentication setting
 curl -s "http://127.0.0.1:9090/api/v3/flows/instances/?slug=ldap-authentication-flow" -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep authentication
 ```
+
+### Application visibility (authentik.fqdn)
+- **Admins** (users in group *authentik Admins*): see all applications (infra-TAK, Node-RED, TAK Portal, MediaMTX, LDAP, etc.).
+- **Regular users**: see only **TAK Portal** and **MediaMTX** (stream). infra-TAK and Node-RED are not listed and are not accessible (proxy returns 403 if they try the URL directly). This is enforced by Authentik policy bindings: admin-only apps have "Allow authentik Admins" bound; TAK Portal and MediaMTX have no binding (= all authenticated users).
 
 ---
 

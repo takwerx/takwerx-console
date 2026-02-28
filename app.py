@@ -332,8 +332,10 @@ def console_page():
     settings = load_settings()
     all_modules = detect_modules()
     modules = {k: m for k, m in all_modules.items() if m.get('installed')}
+    module_versions = get_all_module_versions()
     resp = render_template_string(CONSOLE_TEMPLATE,
-        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION)
+        settings=settings, modules=modules, metrics=get_system_metrics(), version=VERSION,
+        module_versions=module_versions)
     from flask import make_response
     r = make_response(resp)
     r.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
@@ -794,7 +796,7 @@ def generate_caddyfile(settings=None):
             lines.append(f"        reverse_proxy /outpost.goauthentik.io/* 127.0.0.1:9090")
             lines.append(f"")
             lines.append(f"        @public {{")
-            lines.append(f"            path /request-access* /styles.css /favicon.ico /branding/* /public/*")
+            lines.append(f"            path /request-access* /lookup* /styles.css /favicon.ico /branding/* /public/*")
             lines.append(f"        }}")
             lines.append(f"")
             lines.append(f"        handle @public {{")
@@ -1188,6 +1190,166 @@ def run_caddy_deploy(domain):
         plog(f"✗ Error: {str(e)}")
         caddy_deploy_status.update({'running': False, 'error': True})
 
+def _get_takportal_version_info():
+    """Return {version: str, update_available: bool, latest: str|None} for TAK Portal.
+    Version from package.json; update status from container logs [update-check] line."""
+    import re
+    portal_dir = os.path.expanduser('~/TAK-Portal')
+    out = {'version': '', 'update_available': False, 'latest': None}
+    # Prefer package.json version (semantic version)
+    pkg_path = os.path.join(portal_dir, 'package.json')
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path) as f:
+                data = json.load(f)
+            out['version'] = (data.get('version') or '').strip()
+        except Exception:
+            pass
+    if not out['version'] and os.path.isdir(os.path.join(portal_dir, '.git')):
+        rv = subprocess.run(f'cd {portal_dir} && git describe --tags --always 2>/dev/null || git log -1 --format="%h"', shell=True, capture_output=True, text=True, timeout=5)
+        if rv.returncode == 0 and rv.stdout.strip():
+            out['version'] = rv.stdout.strip()
+    # If container is running, parse last [update-check] line for update_available
+    r = subprocess.run('docker ps --filter name=tak-portal -q 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and (r.stdout or '').strip():
+        log_r = subprocess.run('docker logs tak-portal --tail 200 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+        if log_r.stdout:
+            for line in reversed(log_r.stdout.strip().split('\n')):
+                if '[update-check]' in line:
+                    # e.g. [update-check] current=1.2.19 latest=1.2.20 update=true
+                    m = re.search(r'latest=([^\s]+)', line)
+                    if m:
+                        out['latest'] = m.group(1).strip()
+                    if 'update=true' in line:
+                        out['update_available'] = True
+                    break
+    return out
+
+
+def _get_caddy_version_info():
+    """Return {version: str, update_available: bool} for Caddy."""
+    out = {'version': '', 'update_available': False}
+    r = subprocess.run('caddy version 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and r.stdout:
+        # e.g. "v2.8.4" or "Caddy v2.8.4"
+        import re
+        m = re.search(r'v(\d+\.\d+\.\d+[^\s]*)', r.stdout)
+        if m:
+            out['version'] = 'v' + m.group(1).strip()
+    if out['version']:
+        apt = subprocess.run('apt list --upgradable 2>/dev/null | grep -i caddy', shell=True, capture_output=True, text=True, timeout=10)
+        if apt.returncode == 0 and (apt.stdout or '').strip():
+            out['update_available'] = True
+    return out
+
+
+def _get_authentik_version_info():
+    """Return {version: str, update_available: bool} for Authentik from image tag or docker."""
+    out = {'version': '', 'update_available': False}
+    ak_dir = os.path.expanduser('~/authentik')
+    compose_path = os.path.join(ak_dir, 'docker-compose.yml')
+    if not os.path.isfile(compose_path):
+        return out
+    try:
+        with open(compose_path) as f:
+            content = f.read()
+        import re
+        # image: ghcr.io/goauthentik/server:2024.2.1 or :latest
+        m = re.search(r'image:.*?/server:([^\s\n]+)', content)
+        if m:
+            out['version'] = m.group(1).strip()
+        if not out['version']:
+            r = subprocess.run('docker images --format "{{.Tag}}" ghcr.io/goauthentik/server 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                out['version'] = r.stdout.strip().split('\n')[0]
+    except Exception:
+        pass
+    # update_available: leave False unless we add docker compose pull check
+    return out
+
+
+def _get_nodered_version_info():
+    """Return {version: str, update_available: bool} for Node-RED from container or image."""
+    out = {'version': '', 'update_available': False}
+    r = subprocess.run('docker ps -q -f name=nodered 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if not (r.returncode == 0 and (r.stdout or '').strip()):
+        return out
+    # Try to get version from container (Node-RED package.json)
+    ex = subprocess.run('docker exec nodered node -p "try{require(\'/usr/src/node-red/package.json\').version}catch(e){\'\'}" 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if ex.returncode == 0 and ex.stdout.strip():
+        out['version'] = ex.stdout.strip().strip('"\'')
+    if not out['version']:
+        out['version'] = 'latest'
+    return out
+
+
+def _get_cloudtak_version_info():
+    """Return {version: str, update_available: bool, latest: str|None} for CloudTAK."""
+    import re
+    out = {'version': '', 'update_available': False, 'latest': None}
+    ct_dir = os.path.expanduser('~/CloudTAK')
+    for pkg in ['package.json', 'api/package.json', 'web/package.json']:
+        pkg_path = os.path.join(ct_dir, pkg)
+        if os.path.isfile(pkg_path):
+            try:
+                with open(pkg_path) as f:
+                    data = json.load(f)
+                out['version'] = (data.get('version') or '').strip()
+                if out['version']:
+                    break
+            except Exception:
+                pass
+    if not out['version'] and os.path.isdir(os.path.join(ct_dir, '.git')):
+        rv = subprocess.run(f'cd {ct_dir} && git describe --tags --always 2>/dev/null || git log -1 --format="%h"', shell=True, capture_output=True, text=True, timeout=5)
+        if rv.returncode == 0 and rv.stdout.strip():
+            out['version'] = rv.stdout.strip()
+    r = subprocess.run('docker ps -q -f name=cloudtak-api 2>/dev/null', shell=True, capture_output=True, text=True, timeout=5)
+    if r.returncode == 0 and (r.stdout or '').strip():
+        log_r = subprocess.run('docker logs cloudtak-api --tail 150 2>&1', shell=True, capture_output=True, text=True, timeout=10)
+        if log_r.stdout:
+            for line in reversed(log_r.stdout.strip().split('\n')):
+                if '[update-check]' in line:
+                    m = re.search(r'latest=([^\s]+)', line)
+                    if m:
+                        out['latest'] = m.group(1).strip()
+                    if 'update=true' in line:
+                        out['update_available'] = True
+                    break
+    return out
+
+
+def get_all_module_versions():
+    """Return dict of module_key -> {version, update_available, latest?} for console cards."""
+    modules = detect_modules()
+    result = {}
+    if modules.get('caddy', {}).get('installed'):
+        result['caddy'] = _get_caddy_version_info()
+    if modules.get('authentik', {}).get('installed'):
+        result['authentik'] = _get_authentik_version_info()
+    if modules.get('nodered', {}).get('installed'):
+        result['nodered'] = _get_nodered_version_info()
+    if modules.get('cloudtak', {}).get('installed'):
+        result['cloudtak'] = _get_cloudtak_version_info()
+    if modules.get('takportal', {}).get('installed'):
+        result['takportal'] = _get_takportal_version_info()
+    return result
+
+
+@app.route('/api/modules/version')
+@login_required
+def api_modules_version():
+    """Return version and update_available for all installed services (for console cards)."""
+    return jsonify(get_all_module_versions())
+
+
+@app.route('/api/takportal/version')
+@login_required
+def takportal_version_api():
+    """Return TAK Portal version and update-available for module/card UI."""
+    info = _get_takportal_version_info()
+    return jsonify(info)
+
+
 @app.route('/takportal')
 @login_required
 def takportal_page():
@@ -1217,16 +1379,16 @@ def takportal_page():
             for line in f:
                 if line.strip().startswith('WEB_UI_PORT='):
                     portal_port = line.strip().split('=', 1)[1].strip() or '3000'
-    # Get git version info
-    portal_version = ''
-    portal_dir = os.path.expanduser('~/TAK-Portal')
-    if os.path.isdir(os.path.join(portal_dir, '.git')):
-        rv = subprocess.run(f'cd {portal_dir} && git log -1 --format="%h · %ar"', shell=True, capture_output=True, text=True, timeout=5)
-        if rv.returncode == 0 and rv.stdout.strip():
-            portal_version = rv.stdout.strip()
+    # Real version (package.json) and update-available (from container logs)
+    vinfo = _get_takportal_version_info()
+    portal_version = vinfo['version'] or ''
+    portal_update_available = vinfo['update_available']
+    portal_latest = vinfo['latest']
     return render_template_string(TAKPORTAL_TEMPLATE,
         settings=settings, portal=portal, container_info=container_info,
-        portal_port=portal_port, portal_version=portal_version, version=VERSION,
+        portal_port=portal_port, portal_version=portal_version,
+        portal_update_available=portal_update_available, portal_latest=portal_latest,
+        version=VERSION,
         deploying=takportal_deploy_status.get('running', False),
         deploy_done=takportal_deploy_status.get('complete', False))
 
@@ -1251,8 +1413,8 @@ def takportal_control():
         build = subprocess.run(f'cd {portal_dir} && docker compose up -d --build', shell=True, capture_output=True, text=True, timeout=180)
         subprocess.run(f'cd {portal_dir} && docker image prune -f', shell=True, capture_output=True, text=True, timeout=30)
         time.sleep(3)
-        rv = subprocess.run(f'cd {portal_dir} && git log -1 --format="%h · %ar"', shell=True, capture_output=True, text=True, timeout=5)
-        new_version = rv.stdout.strip() if rv.returncode == 0 else ''
+        vinfo = _get_takportal_version_info()
+        new_version = vinfo['version'] or ''
         r = subprocess.run('docker ps --filter name=tak-portal --format "{{.Status}}" 2>/dev/null', shell=True, capture_output=True, text=True)
         running = 'Up' in r.stdout
         return jsonify({'success': True, 'running': running, 'action': action, 'pull': pull_msg, 'version': new_version})
@@ -3728,8 +3890,8 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
 
 
 def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
-    """Restrict infra-TAK, Node-RED, MediaMTX to authentik Admins; TAK Portal open to all authenticated users.
-    Creates a 'Group membership: authentik Admins' policy and binds it to admin-only apps.
+    """Restrict infra-TAK, Node-RED (and LDAP) to authentik Admins. TAK Portal and MediaMTX open to all authenticated users.
+    Creates a 'Group membership: authentik Admins' policy and binds it only to admin-only apps. No binding on TAK Portal/MediaMTX = everyone sees them.
     Idempotent — safe to call on every deploy."""
     import urllib.request as _req
     import urllib.error
@@ -3742,6 +3904,10 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
     def _api_post(path, body):
         r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
         return json.loads(_req.urlopen(r, timeout=15).read().decode())
+
+    def _api_delete(path):
+        r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers, method='DELETE')
+        _req.urlopen(r, timeout=15)
 
     try:
         # 1) Find the "authentik Admins" group PK
@@ -3785,10 +3951,9 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
         else:
             _log(f"  ✓ Policy exists: {policy_name}")
 
-        # 3) Admin-only apps: bind the admin policy (infra-TAK, Node-RED, LDAP)
+        # 3) Admin-only apps: bind the admin policy (infra-TAK, Node-RED, LDAP). TAK Portal and MediaMTX: no binding = all authenticated users.
         admin_only_slugs = ['infra-tak', 'infratak', 'console', 'node-red', 'ldap']
-        mediamtx_slugs = ['mediamtx', 'stream']
-        tak_portal_slug = 'tak-portal'
+        user_visible_slugs = ['mediamtx', 'stream', 'tak-portal']  # no policy = visible to all authenticated users
 
         all_apps = _api_get('core/applications/?page_size=100')['results']
 
@@ -3812,44 +3977,23 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
                     _log(f"  ⚠ {app_name}: binding error: {e}")
                 return False
 
-        # 4) MediaMTX: expression policy — admins OR vid_admin/vid_private/vid_public
+        # Remove "Allow MediaMTX users" binding from stream/mediamtx if present (so they become visible to all authenticated users)
         mtx_policy_name = 'Allow MediaMTX users'
-        mtx_policy_pk = None
-        mtx_expression = (
-            'return ak_is_group_member(request.user, name="authentik Admins") '
-            'or ak_is_group_member(request.user, name="vid_admin") '
-            'or ak_is_group_member(request.user, name="vid_private") '
-            'or ak_is_group_member(request.user, name="vid_public")'
-        )
-        try:
-            existing = _api_get(f'policies/expression/?search={_req.quote(mtx_policy_name)}')['results']
-            for p in existing:
-                if p.get('name') == mtx_policy_name:
-                    mtx_policy_pk = p['pk']
-                    break
-        except Exception:
-            pass
-        if not mtx_policy_pk:
-            try:
-                data = _api_post('policies/expression/', {
-                    'name': mtx_policy_name,
-                    'expression': mtx_expression,
-                })
-                mtx_policy_pk = data['pk']
-                _log(f"  ✓ Created policy: {mtx_policy_name}")
-            except urllib.error.HTTPError as e:
-                if e.code == 400:
+        for app in all_apps:
+            app_slug = app.get('slug', '')
+            if app_slug not in ('mediamtx', 'stream'):
+                continue
+            app_pk = app.get('pk', '')
+            app_name = app.get('name', '')
+            bindings = _api_get(f'policies/bindings/?target={app_pk}&page_size=100')['results']
+            for b in bindings:
+                if (b.get('policy_obj', {}) or {}).get('name') == mtx_policy_name:
                     try:
-                        existing = _api_get(f'policies/expression/?search={_req.quote(mtx_policy_name)}')['results']
-                        for p in existing:
-                            if p.get('name') == mtx_policy_name:
-                                mtx_policy_pk = p['pk']
+                        _api_delete(f'policies/bindings/{b["pk"]}/')
+                        _log(f"  ✓ {app_name}: removed restrictive policy — now open to all authenticated users")
                     except Exception:
                         pass
-                if not mtx_policy_pk:
-                    _log(f"  ⚠ Could not create MediaMTX policy: {e}")
-        else:
-            _log(f"  ✓ Policy exists: {mtx_policy_name}")
+                    break
 
         for app in all_apps:
             app_slug = app.get('slug', '')
@@ -3862,13 +4006,7 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
                 else:
                     _log(f"  ✓ {app_name}: already restricted to authentik Admins")
 
-            elif app_slug in mediamtx_slugs and mtx_policy_pk:
-                if _bind_policy_to_app(app_pk, app_name, mtx_policy_pk, mtx_policy_name):
-                    _log(f"  ✓ {app_name}: visible to authentik Admins + vid_admin/vid_private/vid_public")
-                else:
-                    _log(f"  ✓ {app_name}: already has MediaMTX access policy")
-
-            elif app_slug == tak_portal_slug:
+            elif app_slug in user_visible_slugs:
                 _log(f"  ✓ {app_name}: open to all authenticated users (no restrictive binding)")
 
         return True
@@ -5345,17 +5483,17 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="controls">
 <button class="control-btn btn-stop" onclick="portalControl('stop')">⏹ Stop</button>
 <button class="control-btn" onclick="portalControl('restart')">🔄 Restart</button>
-<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()"{% if portal_update_available %} style="position:relative;border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if portal_update_available %} <span style="margin-left:4px;color:var(--cyan)" title="Update available">●</span>{% endif %}</button>
 </div>
-{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}</div>{% endif %}
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}{% if portal_update_available and portal_latest %} · <span style="color:var(--cyan)">Update to {{ portal_latest }} available</span>{% endif %}</div>{% endif %}
 <div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% elif portal.installed %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--red)">Stopped</div><div class="status-detail">Docker container not running</div></div></div>
 <div class="controls">
 <button class="control-btn btn-start" onclick="portalControl('start')">▶ Start</button>
-<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()">⬆ Update</button>
+<button class="control-btn btn-update" id="update-btn" onclick="portalUpdate()"{% if portal_update_available %} style="position:relative;border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)"{% endif %}>⬆ Update{% if portal_update_available %} <span style="margin-left:4px;color:var(--cyan)" title="Update available">●</span>{% endif %}</button>
 </div>
-{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}</div>{% endif %}
+{% if portal_version %}<div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim)">Version: {{ portal_version }}{% if portal_update_available and portal_latest %} · <span style="color:var(--cyan)">Update to {{ portal_latest }} available</span>{% endif %}</div>{% endif %}
 <div id="update-status" style="display:none;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary)"></div>
 {% else %}
 <div class="status-info"><div class="status-logo-wrap"><span class="material-symbols-outlined" style="font-size:36px">group</span><span class="status-name">TAK Portal</span></div><div><div class="status-text" style="color:var(--text-dim)">Not Installed</div><div class="status-detail">Deploy TAK Portal for user & certificate management</div></div></div>
@@ -8334,6 +8472,7 @@ body{display:flex;flex-direction:row;min-height:100vh}
 {% if not mod.get('icon_url') or key == 'takportal' or key == 'emailrelay' %}<div class="module-name">{{ mod.name }}</div>{% endif %}
 </div>
 <div class="module-desc">{{ mod.description }}</div>
+{% if module_versions.get(key) %}{% set v = module_versions.get(key) %}{% if v.version or v.update_available %}<div class="meta-line module-version-line" id="module-version-{{ key }}" style="margin-bottom:4px">{% if v.version %}v{{ v.version }}{% endif %}{% if v.update_available %} <span style="color:var(--cyan);font-size:10px" title="Update available">⬆ update</span>{% endif %}</div>{% endif %}{% endif %}
 <span class="module-status status-{% if mod.installed and mod.running %}running{% elif mod.installed %}stopped{% else %}not-installed{% endif %}" id="module-status-{{ key }}" data-module="{{ key }}">{% if mod.installed and mod.running %}<span class="status-dot"></span> Running{% elif mod.installed %}<span class="status-dot"></span> Stopped{% else %}Not Installed{% endif %}</span>
 {% if mod.installed %}<span class="module-action">Manage →</span>{% else %}<span class="module-action">Deploy →</span>{% endif %}
 </a>
@@ -8368,6 +8507,21 @@ function refreshModuleCards(){
 }
 setInterval(refreshModuleCards,8000);
 refreshModuleCards();
+function refreshModuleVersions(){
+    fetch('/api/modules/version').then(function(r){return r.json()}).then(function(data){
+        for(var key in data){
+            var el=document.getElementById('module-version-'+key);
+            if(!el)continue;
+            var d=data[key];
+            var s='';
+            if(d.version)s='v'+d.version;
+            if(d.update_available)s+=(s?' ':'')+'<span style="color:var(--cyan);font-size:10px" title="Update available">⬆ update</span>';
+            el.innerHTML=s;if(s)el.style.display='';
+        }
+    }).catch(function(){});
+}
+setInterval(refreshModuleVersions,30000);
+refreshModuleVersions();
 var updateBody='';
 async function checkUpdate(){
     try{

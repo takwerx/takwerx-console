@@ -4,7 +4,9 @@ Applied by infra-TAK at deploy time when Authentik/LDAP is detected.
 Patches the vanilla MediaMTX config editor Flask app to:
   1. Auto-authenticate via Authentik forward_auth headers (no local login page)
   2. Map vid_* LDAP groups to admin/viewer roles
-  3. Provide a Stream Access management page for vid_admin users
+  3. Viewers (vid_public, vid_private): only see Active Streams page at /viewer — same idea as TAK Portal regular user page
+  4. Admins (vid_admin, authentik Admins): full config editor + Stream Access at /stream-access
+  5. Future: filter streams in /viewer by path-to-group mapping (vid_public vs vid_private determines which streams each user sees)
 """
 
 import os
@@ -38,6 +40,9 @@ def _ak_post(path, body=None):
 def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
+    # Paths a viewer is allowed to access (no full editor)
+    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams')
+
     @app.before_request
     def _authentik_auto_auth():
         ak_user = request.headers.get('X-Authentik-Username', '')
@@ -53,13 +58,52 @@ def apply_ldap_overlay(app):
         # Redirect away from standalone auth pages
         if request.path in ('/login', '/register', '/forgot-password', '/reset-password'):
             return redirect('/')
+        # Viewers (vid_public, vid_private) only see Active Streams — redirect to viewer page, block full editor
+        if role == 'viewer':
+            if request.path not in VIEWER_ALLOWED and not request.path.startswith('/static'):
+                return redirect('/viewer')
 
-    # ── Stream Access page ──────────────────────────────────────────────
+    # ── Active Streams viewer page (vid_public / vid_private) ────────────
+
+    @app.route('/viewer')
+    def viewer_page():
+        if session.get('role') != 'viewer':
+            return redirect('/')
+        return Response(ACTIVE_STREAMS_VIEWER_HTML, content_type='text/html')
+
+    @app.route('/api/viewer/streams')
+    def api_viewer_streams():
+        if session.get('role') != 'viewer':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            api_url = os.environ.get('MEDIAMTX_API_URL', 'http://127.0.0.1:9898')
+            req = urllib.request.Request(f'{api_url.rstrip("/")}/v3/paths/list', headers={'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            items = data.get('items') or []
+            # Only show paths that are ready/available (active). TODO: filter by session['ldap_groups'] and path-to-group mapping so vid_public vs vid_private see different streams.
+            streams = []
+            for p in items:
+                name = p.get('name') or p.get('confName') or ''
+                if not name:
+                    continue
+                ready = p.get('ready', False)
+                available = p.get('available', True)
+                streams.append({
+                    'name': name,
+                    'ready': ready,
+                    'available': available,
+                })
+            return jsonify({'streams': streams})
+        except Exception as e:
+            return jsonify({'error': str(e)[:200], 'streams': []}), 500
+
+    # ── Stream Access page (vid_admin only) ──────────────────────────────
 
     @app.route('/stream-access')
     def stream_access_page():
         if session.get('role') != 'admin':
-            return redirect('/')
+            return redirect('/viewer')
         return Response(STREAM_ACCESS_HTML, content_type='text/html')
 
     # ── Stream Access API ───────────────────────────────────────────────
@@ -176,7 +220,85 @@ def apply_ldap_overlay(app):
 
 
 # ════════════════════════════════════════════════════════════════════════
-# Stream Access HTML — standalone page matching editor dark theme
+# Active Streams viewer page (vid_public / vid_private — regular users)
+# ════════════════════════════════════════════════════════════════════════
+
+ACTIVE_STREAMS_VIEWER_HTML = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Active Streams — MediaMTX</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#121212;--surface:#1e1e1e;--surface2:#2a2a2a;--border:#333;
+  --text:#e0e0e0;--text-dim:#888;--text-faint:#555;
+  --accent:#00bcd4;--accent-hover:#00acc1;--success:#22c55e;
+}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
+.header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px}
+.header h1{font-size:20px;font-weight:600}
+.header .subtitle{color:var(--text-dim);font-size:13px;margin-top:4px}
+.container{max-width:800px;margin:0 auto;padding:24px}
+.stream-list{display:flex;flex-direction:column;gap:10px}
+.stream-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.stream-card.live{border-left:4px solid var(--success)}
+.stream-name{font-weight:500;font-size:15px;font-family:monospace}
+.stream-badge{font-size:11px;color:var(--text-dim);text-transform:uppercase}
+.watch-link{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:var(--accent);color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;transition:background .15s}
+.watch-link:hover{background:var(--accent-hover)}
+.loading{text-align:center;padding:48px 20px;color:var(--text-dim)}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty-state{text-align:center;padding:48px 20px;color:var(--text-dim)}
+.empty-state .material-symbols-outlined{font-size:42px;margin-bottom:12px;color:var(--text-faint)}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Active Streams</h1>
+  <div class="subtitle">Streams you can watch</div>
+</div>
+<div class="container">
+  <div id="content">
+    <div class="loading"><div class="spinner"></div><div>Loading streams...</div></div>
+  </div>
+</div>
+<script>
+(async function(){
+  const content = document.getElementById('content');
+  try {
+    const r = await fetch('/api/viewer/streams');
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Failed to load streams');
+    const streams = (data.streams || []).filter(s => s.ready || s.available);
+    if (streams.length === 0) {
+      content.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">videocam_off</span><p>No active streams right now.</p><p style="margin-top:8px;font-size:13px">When someone publishes a stream, it will appear here.</p></div>';
+      return;
+    }
+    const base = window.location.origin;
+    let html = '<div class="stream-list">';
+    for (const s of streams) {
+      const path = (s.name || '').replace(/^\/+|\/+$/g, '');
+      const url = path ? base + '/' + path + '/' : base + '/';
+      html += '<div class="stream-card live"><div><div class="stream-name">' + escapeHtml(s.name) + '</div><div class="stream-badge">Live</div></div><a href="' + escapeHtml(url) + '" class="watch-link" target="_blank" rel="noopener"><span class="material-symbols-outlined" style="font-size:18px">play_circle</span>Watch</a></div>';
+    }
+    html += '</div>';
+    content.innerHTML = html;
+  } catch (err) {
+    content.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">error</span><p>' + escapeHtml(err.message) + '</p></div>';
+  }
+})();
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+</script>
+</body>
+</html>
+'''
+
+# ════════════════════════════════════════════════════════════════════════
+# Stream Access HTML — standalone page (vid_admin only)
 # ════════════════════════════════════════════════════════════════════════
 
 STREAM_ACCESS_HTML = r'''<!DOCTYPE html>

@@ -84,11 +84,13 @@ Same LDAP, same directory; **`vid_*`** = stream access only (MediaMTX), **`tak_*
 
 When Authentik is present, infra-TAK applies an **LDAP overlay** (`mediamtx_ldap_overlay.py`) to the vanilla MediaMTX editor at deploy time. This adds:
 
-1. **Authentik header auth** -- Caddy `forward_auth` handles login; the editor reads `X-Authentik-Username` and `X-Authentik-Groups` headers to auto-authenticate. No local login page; `vid_admin` or `authentik Admins` -> admin role (full console), `vid_private`/`vid_public` -> viewer role (Active Streams only).
+1. **Authentik header auth** -- Caddy `forward_auth` handles login; the editor reads `X-Authentik-Username` and `X-Authentik-Groups` headers to auto-authenticate. No local login page; `vid_admin` or `authentik Admins` -> admin role (full console), `vid_private`/`vid_public` -> viewer role.
 
-2. **Stream Access page** (`/stream-access`) -- A standalone user management page for `vid_admin` users. Lists all Authentik users with their `vid_*` group memberships. Click a group badge to toggle the user in/out of that group. Same LDAP, same users as TAK Portal -- you're just assigning existing people to stream groups, not creating users.
+2. **Viewer page** (`/viewer`) — Same idea as TAK Portal’s regular-user page. Users in **vid_public** or **vid_private** (and no vid_admin) only see the **Active Streams** page: they are redirected from `/` to `/viewer`, and cannot access the full config editor. The viewer page lists active streams from the MediaMTX API with “Watch” links. **Planned:** filter this list by path-to-group mapping so vid_public vs vid_private see only the streams they’re allowed to see.
 
-3. **Sidebar injection** -- The editor's "Web Users" sidebar item is replaced with "Stream Access" linking to the new page. The standalone login/register/forgot-password routes redirect to `/` (Authentik handles all of that).
+3. **Stream Access page** (`/stream-access`) -- A standalone user management page for `vid_admin` users. Lists all Authentik users with their `vid_*` group memberships. Click a group badge to toggle the user in/out of that group. Same LDAP, same users as TAK Portal -- you're just assigning existing people to stream groups, not creating users.
+
+4. **Sidebar injection** -- For admins only: the editor's "Web Users" sidebar item is replaced with "Stream Access" linking to the new page. The standalone login/register/forgot-password routes redirect to `/` (Authentik handles all of that).
 
 **How it works at deploy time:**
 - infra-TAK clones the vanilla editor from `takwerx/mediamtx-installer`
