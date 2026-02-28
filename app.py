@@ -6189,12 +6189,12 @@ entries:
                 with open(coreconfig_path, 'r') as f:
                     config_content = f.read()
 
-                # Build the new auth block. Match known-good CoreConfig: ldap then File; x509* for cache.
+                # Build the new auth block — matches TAK Portal reference exactly
                 auth_block = (
                     '    <auth default="ldap" x509groups="true" x509addAnonymous="false" x509useGroupCache="true" x509useGroupCacheDefaultActive="true" x509checkRevocation="true">\n'
-                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" style="DS" ldapSecurityType="simple" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
+                    '        <ldap url="ldap://127.0.0.1:389" userstring="cn={username},ou=users,dc=takldap" updateinterval="60" groupprefix="cn=tak_" groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)" serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap" serviceAccountCredential="'
                     + ldap_pass
-                    + '" groupObjectClass="group" userObjectClass="user" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" matchGroupInChain="true" roleAttribute="memberOf" dnAttributeName="DN" nameAttr="CN" adminGroup="ROLE_ADMIN"/>\n'
+                    + '" groupBaseRDN="ou=groups,dc=takldap" userBaseRDN="ou=users,dc=takldap" dnAttributeName="DN" nameAttr="CN"/>\n'
                     '        <File location="UserAuthenticationFile.xml"/>\n'
                     '    </auth>'
                 )
@@ -6212,7 +6212,6 @@ entries:
                     with open(coreconfig_path, 'w') as f:
                         f.write(new_content)
                     plog("\u2713 CoreConfig.xml updated with LDAP auth")
-                    plog("  - Nested groups enabled (matchGroupInChain)")
                     plog("  - Group cache enabled (x509useGroupCacheDefaultActive)")
                     plog("  - Group prefix: tak_")
 
@@ -7488,26 +7487,19 @@ def _apply_ldap_to_coreconfig():
     backup_path = coreconfig_path + '.pre-ldap.bak'
     if not os.path.exists(backup_path):
         subprocess.run(['sudo', 'cp', coreconfig_path, backup_path], capture_output=True, timeout=10)
-    # Build the replacement auth block (matches known-good CoreConfig exactly)
+    # Build the replacement auth block — matches TAK Portal reference exactly
     ldap_line = '        <ldap'
     ldap_line += ' url="ldap://127.0.0.1:389"'
     ldap_line += ' userstring="cn={username},ou=users,dc=takldap"'
     ldap_line += ' updateinterval="60"'
     ldap_line += ' groupprefix="cn=tak_"'
     ldap_line += ' groupNameExtractorRegex="cn=tak_(.*?)(?:,|$)"'
-    ldap_line += ' style="DS"'
-    ldap_line += ' ldapSecurityType="simple"'
     ldap_line += ' serviceAccountDN="cn=adm_ldapservice,ou=users,dc=takldap"'
     ldap_line += ' serviceAccountCredential="' + ldap_pass + '"'
-    ldap_line += ' groupObjectClass="group"'
-    ldap_line += ' userObjectClass="user"'
     ldap_line += ' groupBaseRDN="ou=groups,dc=takldap"'
     ldap_line += ' userBaseRDN="ou=users,dc=takldap"'
-    ldap_line += ' matchGroupInChain="true"'
-    ldap_line += ' roleAttribute="memberOf"'
     ldap_line += ' dnAttributeName="DN"'
-    ldap_line += ' nameAttr="CN"'
-    ldap_line += ' adminGroup="ROLE_ADMIN"/>'
+    ldap_line += ' nameAttr="CN"/>'
     auth_block = ''
     auth_block += '    <auth default="ldap" x509groups="true" x509addAnonymous="false"'
     auth_block += ' x509useGroupCache="true" x509useGroupCacheDefaultActive="true"'
