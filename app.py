@@ -2042,13 +2042,9 @@ WantedBy=multi-user.target
                     webeditor_src = p
                     plog("  Using local web editor (clone skipped or failed)")
                     break
-        try:
-            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
-        except Exception:
-            pass
-
         if webeditor_src:
-            subprocess.run(f'cp "{webeditor_src}" {webeditor_dir}/mediamtx_config_editor.py', shell=True)
+            import shutil as _shutil
+            _shutil.copy2(webeditor_src, f'{webeditor_dir}/mediamtx_config_editor.py')
             # Patch port to read from PORT env var instead of hardcoded 5000
             subprocess.run(
                 f"sed -i 's/app.run(host=.0.0.0.0., port=5000/app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 5080))/' {webeditor_dir}/mediamtx_config_editor.py",
@@ -2092,6 +2088,12 @@ WantedBy=multi-user.target
             plog("⚠ mediamtx_config_editor.py not found (clone failed and no local file)")
             plog("  Place it next to app.py or in config-editor/, or fix repo access, then redeploy")
             plog("  MediaMTX streaming will work — web editor unavailable until then")
+
+        # Clean up clone dir now that copy is done
+        try:
+            subprocess.run(f'rm -rf {clone_dir}', shell=True, capture_output=True)
+        except Exception:
+            pass
 
         # Download test video
         test_video_dir = f'{webeditor_dir}/test_videos'
