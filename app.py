@@ -1487,6 +1487,40 @@ def takportal_uninstall():
     takportal_deploy_status.update({'running': False, 'complete': False, 'error': False})
     return jsonify({'success': True, 'steps': steps})
 
+def _portal_email_settings(settings):
+    """Build TAK Portal email settings from the Email Relay config if deployed."""
+    relay = settings.get('email_relay', {})
+    if relay.get('relay_host') and relay.get('smtp_user'):
+        from_addr = relay.get('from_addr', '')
+        from_name = relay.get('from_name', 'TAK Admin')
+        smtp_from = f"{from_name} <{from_addr}>" if from_name and from_addr else from_addr
+        return {
+            "EMAIL_ENABLED": "true",
+            "EMAIL_PROVIDER": "smtp",
+            "SMTP_HOST": relay.get('relay_host', ''),
+            "SMTP_PORT": str(relay.get('relay_port', '587')),
+            "SMTP_SECURE": "false",
+            "SMTP_USER": relay.get('smtp_user', ''),
+            "SMTP_PASS": relay.get('smtp_pass', ''),
+            "SMTP_FROM": smtp_from,
+            "EMAIL_ALWAYS_CC": "",
+            "EMAIL_SEND_COPY_TO": "",
+            "EMAIL_FAIL_HARD": "false",
+        }
+    return {
+        "EMAIL_ENABLED": "false",
+        "EMAIL_PROVIDER": "smtp",
+        "SMTP_HOST": "",
+        "SMTP_PORT": "587",
+        "SMTP_SECURE": "false",
+        "SMTP_USER": "",
+        "SMTP_PASS": "",
+        "SMTP_FROM": "",
+        "EMAIL_ALWAYS_CC": "",
+        "EMAIL_SEND_COPY_TO": "",
+        "EMAIL_FAIL_HARD": "false",
+    }
+
 def run_takportal_deploy():
     def plog(msg):
         entry = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
@@ -1682,17 +1716,7 @@ def run_takportal_deploy():
             "TAK_DEBUG": "false",
             "TAK_BYPASS_ENABLED": "false",
             "CLOUDTAK_URL": f"https://cloudtak.{settings['fqdn']}" if settings.get('fqdn') else "",
-            "EMAIL_ENABLED": "false",
-            "EMAIL_PROVIDER": "smtp",
-            "SMTP_HOST": "",
-            "SMTP_PORT": "587",
-            "SMTP_SECURE": "false",
-            "SMTP_USER": "",
-            "SMTP_PASS": "",
-            "SMTP_FROM": "",
-            "EMAIL_ALWAYS_CC": "",
-            "EMAIL_SEND_COPY_TO": "",
-            "EMAIL_FAIL_HARD": "false",
+            **_portal_email_settings(settings),
             "BRAND_THEME": "dark",
             "BRAND_LOGO_URL": ""
         }
@@ -1706,6 +1730,10 @@ def run_takportal_deploy():
         plog(f"  Authentik URL: {portal_settings['AUTHENTIK_PUBLIC_URL']}")
         plog(f"  TAK Server URL: {portal_settings['TAK_URL']}")
         plog(f"  Portal Auth: {portal_settings['PORTAL_AUTH_ENABLED']}")
+        if portal_settings.get('EMAIL_ENABLED') == 'true':
+            plog(f"  Email: enabled ({portal_settings.get('SMTP_HOST')}:{portal_settings.get('SMTP_PORT')} from {portal_settings.get('SMTP_FROM')})")
+        else:
+            plog("  Email: not configured (deploy Email Relay first for auto-config)")
         if ak_token:
             plog("  Authentik API token: configured")
         else:
