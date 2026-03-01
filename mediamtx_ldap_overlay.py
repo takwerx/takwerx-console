@@ -69,7 +69,7 @@ def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
     VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred')
-    VIEWER_PREFIXES = ('/watch/',)
+    VIEWER_PREFIXES = ('/watch/', '/hls-proxy/')
 
     @app.before_request
     def _authentik_auto_auth():
