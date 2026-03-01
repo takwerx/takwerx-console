@@ -9098,8 +9098,12 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 {% elif ldap_connected %}
 <div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
-<div style="display:flex;align-items:center;gap:10px"><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
+<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+<div><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
+<button type="button" id="fix-ldap-btn" onclick="fixLdap()" style="padding:8px 16px;background:transparent;color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;font-size:12px;cursor:pointer">Fix LDAP bindings</button>
+</div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
+<div id="fix-ldap-msg" style="margin-top:8px;font-size:12px;color:var(--text-dim)"></div>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
