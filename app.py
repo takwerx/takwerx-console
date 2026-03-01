@@ -1674,7 +1674,7 @@ def run_takportal_deploy():
             "PORTAL_AUTH_REQUIRED_GROUP": "authentik Admins" if settings.get('fqdn') else "",
             "AUTHENTIK_PUBLIC_URL": f"https://authentik.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:9090",
             "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
-            "TAK_URL": f"https://tak.{settings['fqdn']}" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
+            "TAK_URL": f"https://tak.{settings['fqdn']}:8443/Marti" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
             "TAK_API_P12_PATH": "./certs/admin.p12",
             "TAK_API_P12_PASSPHRASE": "atakatak",
             "TAK_CA_PATH": "./certs/tak-ca.pem",
@@ -2330,13 +2330,88 @@ WantedBy=multi-user.target
                 f'Environment=AUTHENTIK_TOKEN={ak_token_val}\n'
             )
 
+        # Write self-healing overlay script — runs before every service start
+        # Re-injects LDAP overlay + patches (port, API) if the upstream editor self-updated
+        if ldap_available:
+            heal_script = r'''#!/usr/bin/env python3
+"""Pre-start hook: ensure infra-TAK LDAP overlay is injected into the editor.
+
+Runs as ExecStartPre so that upstream self-updates (Versions tab) don't
+silently remove the overlay.  Idempotent — does nothing if already patched.
+"""
+import os, re, sys
+
+EDITOR  = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'
+OVERLAY = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
+MARKER  = '# --- infra-TAK LDAP overlay ---'
+
+if not os.path.exists(EDITOR) or not os.path.exists(OVERLAY):
+    sys.exit(0)
+
+with open(EDITOR, 'r') as f:
+    src = f.read()
+
+changed = False
+
+# 1. Port patch: ensure PORT env var override
+if 'port=5000' in src and 'os.environ.get("PORT"' not in src:
+    src = src.replace('port=5000', 'port=int(os.environ.get("PORT", 5080))', 1)
+    changed = True
+
+# 2. API port patch: 9997 -> 9898
+if '9997' in src:
+    src = src.replace('9997', '9898')
+    changed = True
+
+# 3. LDAP overlay import injection
+if MARKER not in src:
+    inject = (
+        "\n" + MARKER + "\n"
+        "import os as _os\n"
+        "if _os.environ.get('LDAP_ENABLED'):\n"
+        "    import sys as _sys; _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
+        "    from mediamtx_ldap_overlay import apply_ldap_overlay\n"
+        "    apply_ldap_overlay(app)\n"
+        "# --- end LDAP overlay ---\n"
+    )
+    lines = src.splitlines(keepends=True)
+    inserted = False
+    for i, line in enumerate(lines):
+        if 'app = Flask(' in line:
+            lines.insert(i + 1, '\n' + inject)
+            inserted = True
+            break
+    if not inserted:
+        for i, line in enumerate(lines):
+            if 'app.run(' in line:
+                lines.insert(i, '\n' + inject)
+                inserted = True
+                break
+    if inserted:
+        src = ''.join(lines)
+        changed = True
+
+if changed:
+    with open(EDITOR, 'w') as f:
+        f.write(src)
+'''
+            heal_path = f'{webeditor_dir}/ensure_overlay.py'
+            with open(heal_path, 'w') as hf:
+                hf.write(heal_script)
+            os.chmod(heal_path, 0o755)
+            plog("✓ Self-healing overlay script installed (runs on every service start)")
+
+        exec_start_pre = ''
+        if ldap_available:
+            exec_start_pre = f'ExecStartPre=/usr/bin/python3 {webeditor_dir}/ensure_overlay.py\n'
+
         webeditor_svc = f"""[Unit]
 Description=MediaMTX Web Configuration Editor
 After=network.target mediamtx.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
+{exec_start_pre}ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
 WorkingDirectory=/opt/mediamtx-webeditor
 Environment=PORT=5080
 Environment=MEDIAMTX_API_URL=http://127.0.0.1:9898
