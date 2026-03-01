@@ -7031,6 +7031,53 @@ entries:
                 else:
                     plog(f"  ✗ LDAP start failed: {(r.stderr or r.stdout or '').strip()[:300]}")
 
+        # Verify LDAP flow + service account bind after outpost is up
+        # Prevents "Invalid Credentials" drift after Update & Config
+        if os.path.exists(os.path.join(ak_dir, '.env')):
+            plog("")
+            plog("  Verifying LDAP service account...")
+            try:
+                ok, err = _ensure_ldap_flow_authentication_none()
+                if ok:
+                    plog("  ✓ LDAP flow authentication: none")
+                else:
+                    plog(f"  ⚠ LDAP flow fix: {err}")
+                # Re-set password and verify bind
+                _ldap_pass = ''
+                with open(os.path.join(ak_dir, '.env')) as _f:
+                    for _line in _f:
+                        if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_LDAPSERVICE_PASSWORD='):
+                            _ldap_pass = _line.strip().split('=', 1)[1].strip()
+                if _ldap_pass:
+                    _ak_token = ''
+                    with open(os.path.join(ak_dir, '.env')) as _f:
+                        for _line in _f:
+                            if _line.strip().startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                                _ak_token = _line.strip().split('=', 1)[1].strip()
+                    if _ak_token:
+                        _ak_headers = {'Authorization': f'Bearer {_ak_token}', 'Content-Type': 'application/json'}
+                        try:
+                            req = urllib.request.Request(f'http://127.0.0.1:9090/api/v3/core/users/?search=adm_ldapservice', headers=_ak_headers)
+                            resp = urllib.request.urlopen(req, timeout=10)
+                            _results = json.loads(resp.read().decode()).get('results', [])
+                            _ldap_pk = next((u['pk'] for u in _results if u['username'] == 'adm_ldapservice'), None)
+                            if _ldap_pk:
+                                req = urllib.request.Request(f'http://127.0.0.1:9090/api/v3/core/users/{_ldap_pk}/set_password/',
+                                    data=json.dumps({'password': _ldap_pass}).encode(), headers=_ak_headers, method='POST')
+                                urllib.request.urlopen(req, timeout=10)
+                                time.sleep(3)
+                                r = subprocess.run(
+                                    f'ldapsearch -x -H ldap://127.0.0.1:389 -D "cn=adm_ldapservice,ou=users,dc=takldap" -w "{_ldap_pass}" -b "dc=takldap" -s base "(objectClass=*)" 2>&1',
+                                    shell=True, capture_output=True, text=True, timeout=15)
+                                if 'dn:' in (r.stdout or '').lower() or 'result: 0' in (r.stdout or '').lower():
+                                    plog("  ✓ LDAP bind verified")
+                                else:
+                                    plog(f"  ⚠ LDAP bind check inconclusive (service may still be starting)")
+                        except Exception as e:
+                            plog(f"  ⚠ LDAP verify: {str(e)[:100]}")
+            except Exception as e:
+                plog(f"  ⚠ LDAP verify skipped: {str(e)[:80]}")
+
         # Step 12: Configure Proxy Provider, Application, Outpost, Brand for TAK Portal
         fqdn = settings.get('fqdn', '')
         if fqdn:
