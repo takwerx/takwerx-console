@@ -5785,6 +5785,45 @@ def authentik_page():
         portal_installed=portal_installed,
         portal_running=portal_running)
 
+@app.route('/api/authentik/apply-app-policies', methods=['POST'])
+@login_required
+def authentik_apply_app_policies():
+    """Apply application access policies so only authentik Admins see infra-TAK/Node-RED; regular users see only TAK Portal and MediaMTX."""
+    ak_dir = os.path.expanduser('~/authentik')
+    env_path = os.path.join(ak_dir, '.env')
+    if not os.path.isfile(env_path):
+        return jsonify({'success': False, 'error': 'Authentik not installed or .env missing', 'log': []}), 400
+    ak_token = ''
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('AUTHENTIK_TOKEN='):
+                ak_token = line.split('=', 1)[1].strip()
+                break
+    if not ak_token:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('AUTHENTIK_BOOTSTRAP_TOKEN='):
+                    ak_token = line.split('=', 1)[1].strip()
+                    break
+    if not ak_token:
+        return jsonify({'success': False, 'error': 'No AUTHENTIK_TOKEN or AUTHENTIK_BOOTSTRAP_TOKEN in .env', 'log': []}), 400
+    ak_url = 'http://127.0.0.1:9090'
+    ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
+    log_lines = []
+    def plog(msg):
+        log_lines.append(msg)
+    try:
+        ok = _ensure_app_access_policies(ak_url, ak_headers, plog=plog)
+        if ok:
+            return jsonify({'success': True, 'message': 'Application access policies applied. Only authentik Admins see infra-TAK and Node-RED.', 'log': log_lines})
+        return jsonify({'success': False, 'error': 'Policy setup failed (check log)', 'log': log_lines}), 500
+    except Exception as e:
+        log_lines.append(str(e))
+        return jsonify({'success': False, 'error': str(e)[:200], 'log': log_lines}), 500
+
+
 @app.route('/api/authentik/control', methods=['POST'])
 @login_required
 def authentik_control():
@@ -7145,16 +7184,22 @@ body{display:flex;min-height:100vh}
 {% endif %}
 <div class="section-title">Container Logs <span id="log-filter-label" style="font-size:11px;color:var(--cyan);margin-left:8px"></span></div>
 <div class="deploy-log" id="container-log">Loading logs...</div>
+<div style="margin-top:16px;font-size:12px;color:var(--text-dim);margin-bottom:8px">Restrict app visibility: only users in <strong>authentik Admins</strong> see infra-TAK and Node-RED; regular users see only TAK Portal and MediaMTX at authentik.fqdn.</div>
 <div style="margin-top:24px;text-align:center">
+<button class="control-btn" onclick="applyAppPolicies()" style="margin-right:12px" title="Bind admin-only policy to infra-TAK, Node-RED">🔒 Apply app access policies</button>
 <button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
+<div id="apply-policies-status" style="display:none;margin-top:12px;padding:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
 {% elif ak.installed %}
+<div style="margin-top:16px;font-size:12px;color:var(--text-dim);margin-bottom:8px">Restrict app visibility: only users in <strong>authentik Admins</strong> see infra-TAK and Node-RED; regular users see only TAK Portal and MediaMTX.</div>
 <div style="margin-top:24px;text-align:center">
+<button class="control-btn" onclick="applyAppPolicies()" style="margin-right:12px" title="Bind admin-only policy to infra-TAK, Node-RED">🔒 Apply app access policies</button>
 <button class="control-btn btn-start" onclick="akControl('start')" style="margin-right:12px">▶ Start</button>
 <button class="control-btn" onclick="reconfigureAk()" style="margin-right:12px">🔄 Update config & reconnect</button>
 <button class="control-btn btn-remove" onclick="document.getElementById('ak-uninstall-modal').classList.add('open')">🗑 Remove Authentik</button>
 </div>
+<div id="apply-policies-status" style="display:none;margin-top:12px;padding:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
 {% else %}
 <div class="section-title">About Authentik</div>
 <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:24px">
@@ -7243,6 +7288,20 @@ async function reconfigureAk(){
         if(d.success)window.location.href='/authentik';
         else alert('Error: '+(d.error||'Reconfigure failed'));
     }catch(e){alert('Error: '+e.message)}
+}
+async function applyAppPolicies(){
+    var status=document.getElementById('apply-policies-status');
+    if(!status)return;
+    status.style.display='block';
+    status.textContent='Applying...';
+    status.style.color='var(--text-secondary)';
+    try{
+        var r=await fetch('/api/authentik/apply-app-policies',{method:'POST',headers:{'Content-Type':'application/json'}});
+        var d=await r.json();
+        if(d.log&&d.log.length)status.textContent=(d.message?d.message+'\n\n':'')+d.log.join('\n');
+        else status.textContent=d.message||d.error||'Done';
+        status.style.color=d.success?'var(--green)':'var(--red)';
+    }catch(e){status.textContent='Error: '+e.message;status.style.color='var(--red)'}
 }
 
 var logIndex=0;
