@@ -6324,7 +6324,6 @@ entries:
       name: LDAP Service account
       type: service_account
       path: users
-      password: !Context password
   - attrs:
       authentication: none
       denied_action: message_continue
@@ -6342,8 +6341,6 @@ entries:
       backends:
       - authentik.core.auth.InbuiltBackend
       - authentik.core.auth.TokenBackend
-      - authentik.sources.ldap.auth.LDAPBackend
-      configure_flow: !Find [authentik_flows.flow, [slug, default-password-change]]
       failed_attempts_before_cancel: 5
     identifiers:
       name: ldap-authentication-password
@@ -6352,12 +6349,10 @@ entries:
     id: ldap-authentication-password
   - attrs:
       case_insensitive_matching: true
-      password_stage: !KeyOf ldap-authentication-password
       pretend_user_exists: true
       show_matched_user: true
       user_fields:
       - username
-      - email
     identifiers:
       name: ldap-identification-stage
     model: authentik_stages_identification.identificationstage
@@ -7750,9 +7745,11 @@ def _test_ldap_bind(ldap_pass):
     return 'authenticated' in log and ('adm_ldapservice' in log or 'ldapservice' in log)
 
 def _ensure_ldap_flow_authentication_none():
-    """Ensure ldap-authentication-flow exists with authentication:none, restart LDAP outpost.
+    """Ensure ldap-authentication-flow exists with authentication:none and 3 stage bindings, restart LDAP outpost.
     If flow missing (blueprint never ran), create it by cloning default-authentication-flow.
+    If flow exists but has no stage bindings (deleted during debugging), recreate them from blueprint stages.
     Fixes 'Flow does not apply to current user' — require_outpost blocks user binds.
+    Fixes 'Access denied for user' / Insufficient access (50) — missing bindings cause auth to fail.
     Returns (True, None) on success, (False, error_msg) on failure."""
     import urllib.request as _req
     import urllib.error
@@ -7792,6 +7789,42 @@ def _ensure_ldap_flow_authentication_none():
 
         if ldap_flow:
             _patch('flows/instances/ldap-authentication-flow/', {'authentication': 'none'})
+            # Ensure 3 stage bindings exist (blueprint may not have recreated them after manual deletion)
+            ldap_flow_pk = ldap_flow['pk']
+            all_bindings = []
+            page = 1
+            while True:
+                data = _get(f'flows/bindings/?ordering=order&page_size=500&page={page}')
+                all_bindings.extend(data.get('results', []))
+                if not data.get('pagination', {}).get('next'):
+                    break
+                page += 1
+            ldap_bindings = [b for b in all_bindings if str(b.get('target')) == str(ldap_flow_pk)]
+            if len(ldap_bindings) < 3:
+                # Find blueprint stages by name
+                def _find_stage(api_path, name):
+                    data = _get(f'{api_path}?search={name}')
+                    for s in data.get('results', []):
+                        if s.get('name') == name:
+                            return s.get('pk')
+                    return None
+                id_stage = _find_stage('stages/identification/', 'ldap-identification-stage')
+                pw_stage = _find_stage('stages/password/', 'ldap-authentication-password')
+                login_stage = _find_stage('stages/user_login/', 'ldap-authentication-login')
+                if id_stage and pw_stage and login_stage:
+                    existing_orders = {b.get('order') for b in ldap_bindings}
+                    binding_specs = [(10, id_stage), (15, pw_stage), (20, login_stage)]
+                    for order, stage_pk in binding_specs:
+                        if order not in existing_orders:
+                            try:
+                                _post('flows/bindings/', {
+                                    'target': ldap_flow_pk, 'stage': stage_pk, 'order': order,
+                                    'evaluate_on_plan': True, 're_evaluate_policies': True,
+                                    'policy_engine_mode': 'any', 'invalid_response_action': 'retry'})
+                            except urllib.error.HTTPError:
+                                pass
+                else:
+                    return False, f'LDAP stages not found: id={id_stage} pw={pw_stage} login={login_stage}'
         else:
             if not default_flow:
                 return False, 'Default authentication flow not found. Authentik may not be fully initialized.'
@@ -7838,9 +7871,10 @@ def _ensure_ldap_flow_authentication_none():
         return False, f'Authentik API {e.code}: {body}'
     except Exception as e:
         return False, str(e)[:120]
-    subprocess.run(f'cd {ak_dir} && docker compose restart ldap 2>&1',
+    # LDAP outpost caches flow results — force-recreate required after flow/binding changes
+    subprocess.run(f'cd {ak_dir} && docker compose up -d --force-recreate ldap 2>&1',
         shell=True, capture_output=True, timeout=60)
-    time.sleep(3)
+    time.sleep(5)
     return True, None
 
 def _ensure_authentik_ldap_service_account():
