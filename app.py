@@ -263,10 +263,30 @@ def get_system_metrics():
     boot = datetime.fromtimestamp(psutil.boot_time())
     uptime = datetime.now() - boot
     d, h, m = uptime.days, uptime.seconds // 3600, (uptime.seconds % 3600) // 60
+    uu = _get_unattended_upgrades_status()
     return {'cpu_percent': cpu, 'ram_percent': round(ram.percent, 1),
         'ram_used_gb': round(ram.used / (1024**3), 1), 'ram_total_gb': round(ram.total / (1024**3), 1),
         'disk_percent': round(disk.percent, 1), 'disk_used_gb': round(disk.used / (1024**3), 1),
-        'disk_total_gb': round(disk.total / (1024**3), 1), 'uptime': f"{d}d {h}h {m}m"}
+        'disk_total_gb': round(disk.total / (1024**3), 1), 'uptime': f"{d}d {h}h {m}m",
+        'unattended_upgrades': uu}
+
+def _get_unattended_upgrades_status():
+    """Return dict with 'enabled' (bool) and 'running' (bool) for unattended-upgrades."""
+    enabled = False
+    try:
+        r = subprocess.run('systemctl is-enabled unattended-upgrades 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=5)
+        enabled = r.stdout.strip() == 'enabled'
+    except Exception:
+        pass
+    running = False
+    try:
+        proc = subprocess.run('ps aux | grep "/usr/bin/unattended-upgrade" | grep -v shutdown | grep -v grep',
+            shell=True, capture_output=True, text=True, timeout=5)
+        running = bool(proc.stdout.strip())
+    except Exception:
+        pass
+    return {'enabled': enabled, 'running': running}
 
 # === Routes ===
 
@@ -8488,6 +8508,9 @@ def run_takserver_deploy(config):
             log_step("No GPG key/policy — skipping verification")
 
         log_step(""); log_step("━━━ Step 4/9: Installing TAK Server ━━━")
+        settings = load_settings()
+        if settings.get('pkg_mgr', 'apt') == 'apt':
+            wait_for_apt_lock(log_step, deploy_log)
         log_step(f"Installing {pkg_name}...")
         # Primary: apt-get install handles dependencies automatically
         r1 = run_cmd(f'DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y {pkg} 2>&1', check=False)
@@ -8772,6 +8795,27 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;height:2px;background
 def api_metrics():
     return jsonify(get_system_metrics())
 
+@app.route('/api/unattended-upgrades', methods=['POST'])
+@login_required
+def api_toggle_unattended_upgrades():
+    """Enable or disable unattended-upgrades service."""
+    action = request.json.get('action') if request.is_json else None
+    if action not in ('enable', 'disable'):
+        return jsonify({'success': False, 'error': 'action must be enable or disable'}), 400
+    try:
+        if action == 'disable':
+            subprocess.run('systemctl stop unattended-upgrades && systemctl disable unattended-upgrades',
+                shell=True, check=True, capture_output=True, text=True, timeout=30)
+        else:
+            subprocess.run('systemctl enable unattended-upgrades && systemctl start unattended-upgrades',
+                shell=True, check=True, capture_output=True, text=True, timeout=30)
+        uu = _get_unattended_upgrades_status()
+        return jsonify({'success': True, 'enabled': uu['enabled'], 'running': uu['running']})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'success': False, 'error': e.stderr or str(e)}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/modules')
 @login_required
 def api_modules():
@@ -8847,6 +8891,19 @@ body{display:flex;flex-direction:row;min-height:100vh}
 <div class="metric-card"><div class="metric-label">Memory</div><div class="metric-value" id="ram-value">{{ metrics.ram_percent }}%</div><div class="metric-detail">{{ metrics.ram_used_gb }}GB / {{ metrics.ram_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Disk</div><div class="metric-value" id="disk-value">{{ metrics.disk_percent }}%</div><div class="metric-detail">{{ metrics.disk_used_gb }}GB / {{ metrics.disk_total_gb }}GB</div></div>
 <div class="metric-card"><div class="metric-label">Uptime</div><div class="metric-value" id="uptime-value" style="font-size:18px">{{ metrics.uptime }}</div></div>
+<div class="metric-card" style="position:relative">
+<div class="metric-label" style="display:flex;align-items:center;gap:6px">Auto Updates
+{% if metrics.unattended_upgrades.running %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:pulse 2s infinite" title="Upgrade in progress"></span>{% endif %}
+</div>
+<div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+<label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;margin:0">
+<input type="checkbox" id="uu-toggle" {% if metrics.unattended_upgrades.enabled %}checked{% endif %} onchange="toggleUU(this)" style="opacity:0;width:0;height:0">
+<span style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}rgba(71,85,105,0.5){% endif %};border-radius:20px;transition:.3s" id="uu-slider"></span>
+<span style="position:absolute;content:'';height:16px;width:16px;left:{% if metrics.unattended_upgrades.enabled %}18px{% else %}2px{% endif %};bottom:2px;background:#fff;border-radius:50%;transition:.3s" id="uu-knob"></span>
+</label>
+<span id="uu-label" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:{% if metrics.unattended_upgrades.enabled %}var(--green){% else %}var(--text-dim){% endif %}">{% if metrics.unattended_upgrades.running %}Running…{% elif metrics.unattended_upgrades.enabled %}Enabled{% else %}Disabled{% endif %}</span>
+</div>
+</div>
 </div>
 <div class="section-title">Console</div>
 <div class="meta-line">v{{ version }} · {{ settings.get('os_name', 'Unknown OS') }} · {{ settings.get('server_ip', 'N/A') }}{% if settings.get('fqdn') %} · {{ settings.get('fqdn') }}{% endif %}</div>
@@ -8884,7 +8941,28 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 </div>
 <script>
-setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime}catch(e){}},5000);
+function updateUU(uu){
+    if(!uu)return;
+    var tog=document.getElementById('uu-toggle'),sl=document.getElementById('uu-slider'),kn=document.getElementById('uu-knob'),lb=document.getElementById('uu-label');
+    if(!tog)return;
+    tog.checked=uu.enabled;
+    sl.style.background=uu.enabled?'var(--green)':'rgba(71,85,105,0.5)';
+    kn.style.left=uu.enabled?'18px':'2px';
+    lb.style.color=uu.enabled?'var(--green)':'var(--text-dim)';
+    lb.textContent=uu.running?'Running…':uu.enabled?'Enabled':'Disabled';
+}
+async function toggleUU(cb){
+    var action=cb.checked?'enable':'disable';
+    var lb=document.getElementById('uu-label');
+    lb.textContent=cb.checked?'Enabling…':'Disabling…';lb.style.color='var(--cyan)';
+    try{
+        var r=await fetch('/api/unattended-upgrades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});
+        var d=await r.json();
+        if(d.success){updateUU(d)}
+        else{cb.checked=!cb.checked;lb.textContent='Error: '+(d.error||'unknown');lb.style.color='var(--red)'}
+    }catch(e){cb.checked=!cb.checked;lb.textContent='Error';lb.style.color='var(--red)'}
+}
+setInterval(async()=>{try{const r=await fetch('/api/metrics');const d=await r.json();document.getElementById('cpu-value').textContent=d.cpu_percent+'%';document.getElementById('ram-value').textContent=d.ram_percent+'%';document.getElementById('disk-value').textContent=d.disk_percent+'%';document.getElementById('uptime-value').textContent=d.uptime;updateUU(d.unattended_upgrades)}catch(e){}},5000);
 function refreshModuleCards(){
     fetch('/api/modules').then(r=>r.json()).then(function(mods){
         for(var k in mods){
