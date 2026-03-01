@@ -3895,17 +3895,33 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
     Idempotent — safe to call on every deploy."""
     import urllib.request as _req
     import urllib.error
+    from urllib.parse import quote as _quote
     _log = plog or (lambda m: None)
+    _last_path = [None]  # cell for closure
+
+    def _log_http_err(e, path_hint=None):
+        path = path_hint or _last_path[0] or '?'
+        full_url = f'{ak_url}/api/v3/{path}' if path and path != '?' else getattr(e, 'url', path)
+        try:
+            body = e.fp.read(200).decode(errors='replace') if e.fp else ''
+        except Exception:
+            body = ''
+        _log(f"  ⚠ App access policy API error: {e.code} {e.reason} — {full_url}")
+        if body:
+            _log(f"     Response: {body[:120]}")
 
     def _api_get(path):
+        _last_path[0] = path
         r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers)
         return json.loads(_req.urlopen(r, timeout=15).read().decode())
 
     def _api_post(path, body):
+        _last_path[0] = path
         r = _req.Request(f'{ak_url}/api/v3/{path}', data=json.dumps(body).encode(), headers=ak_headers, method='POST')
         return json.loads(_req.urlopen(r, timeout=15).read().decode())
 
     def _api_delete(path):
+        _last_path[0] = path
         r = _req.Request(f'{ak_url}/api/v3/{path}', headers=ak_headers, method='DELETE')
         _req.urlopen(r, timeout=15)
 
@@ -3923,7 +3939,7 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
 
         # 2) Find or create the "Allow authentik Admins" group membership policy
         policy_name = 'Allow authentik Admins'
-        policies = _api_get(f'policies/group_membership/?search={_req.quote(policy_name)}')['results']
+        policies = _api_get(f'policies/group_membership/?search={_quote(policy_name)}')['results']
         policy_pk = None
         for p in policies:
             if p.get('name') == policy_name:
@@ -3939,7 +3955,7 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
                 _log(f"  ✓ Created policy: {policy_name}")
             except urllib.error.HTTPError as e:
                 if e.code == 400:
-                    policies = _api_get(f'policies/group_membership/?search={_req.quote(policy_name)}')['results']
+                    policies = _api_get(f'policies/group_membership/?search={_quote(policy_name)}')['results']
                     for p in policies:
                         if p.get('name') == policy_name:
                             policy_pk = p['pk']
@@ -4011,6 +4027,10 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
 
         return True
 
+    except urllib.error.HTTPError as e:
+        _log_http_err(e)
+        _log(f"  ⚠ App access policy setup: HTTP Error {e.code}: {e.reason}")
+        return False
     except Exception as e:
         _log(f"  ⚠ App access policy setup: {str(e)[:150]}")
         return False
