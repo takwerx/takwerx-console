@@ -34,13 +34,15 @@ def _ak_get(path):
 def _ak_post(path, body=None):
     data = json.dumps(body).encode() if body else None
     r = urllib.request.Request(f'{AK_URL}/api/v3/{path}', data=data, headers=_ak_headers(), method='POST')
-    return json.loads(urllib.request.urlopen(r, timeout=15).read().decode())
+    raw = urllib.request.urlopen(r, timeout=15).read().decode()
+    return json.loads(raw) if raw.strip() else {}
 
 
 def _ak_patch(path, body):
     data = json.dumps(body).encode()
     r = urllib.request.Request(f'{AK_URL}/api/v3/{path}', data=data, headers=_ak_headers(), method='PATCH')
-    return json.loads(urllib.request.urlopen(r, timeout=15).read().decode())
+    raw = urllib.request.urlopen(r, timeout=15).read().decode()
+    return json.loads(raw) if raw.strip() else {}
 
 
 def _ak_delete(path):
