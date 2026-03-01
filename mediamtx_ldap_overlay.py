@@ -94,7 +94,7 @@ def _ak_delete(path):
 def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
-    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred', '/api/share-links', '/api/share-links/generate')
+    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred', '/api/share-links', '/api/share-links/generate', '/api/theme/logo')
     VIEWER_PREFIXES = ('/watch/', '/hls-proxy/', '/shared/', '/shared-hls/')
 
     @app.before_request
