@@ -68,8 +68,8 @@ def _ak_delete(path):
 def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
-    # Paths a viewer is allowed to access (no full editor)
-    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams')
+    VIEWER_ALLOWED = ('/viewer', '/api/viewer/streams', '/api/viewer/hlscred')
+    VIEWER_PREFIXES = ('/watch/',)
 
     @app.before_request
     def _authentik_auto_auth():
@@ -89,7 +89,8 @@ def apply_ldap_overlay(app):
             return redirect('/')
         # Viewers (vid_public, vid_private) only see Active Streams — redirect to viewer page, block full editor
         if role == 'viewer':
-            if request.path not in VIEWER_ALLOWED and not request.path.startswith('/static'):
+            p = request.path
+            if p not in VIEWER_ALLOWED and not p.startswith('/static') and not any(p.startswith(px) for px in VIEWER_PREFIXES):
                 return redirect('/viewer')
 
     # ── HLS helpers ─────────────────────────────────────────────────────
