@@ -37,6 +37,17 @@ def _ak_post(path, body=None):
     return json.loads(urllib.request.urlopen(r, timeout=15).read().decode())
 
 
+def _ak_patch(path, body):
+    data = json.dumps(body).encode()
+    r = urllib.request.Request(f'{AK_URL}/api/v3/{path}', data=data, headers=_ak_headers(), method='PATCH')
+    return json.loads(urllib.request.urlopen(r, timeout=15).read().decode())
+
+
+def _ak_delete(path):
+    r = urllib.request.Request(f'{AK_URL}/api/v3/{path}', headers=_ak_headers(), method='DELETE')
+    urllib.request.urlopen(r, timeout=15)
+
+
 def apply_ldap_overlay(app):
     """Patch the Flask app for Authentik/LDAP mode."""
 
@@ -114,31 +125,38 @@ def apply_ldap_overlay(app):
         if session.get('role') != 'admin':
             return jsonify({'error': 'Unauthorized'}), 403
         try:
-            vid_group_map = {}
-            for gname in VID_GROUPS:
+            ALL_TRACKED = list(VID_GROUPS) + ['authentik Admins']
+            group_map = {}
+            for gname in ALL_TRACKED:
                 try:
                     result = _ak_get(f'core/groups/?search={urllib.request.quote(gname)}')
                     for g in result.get('results', []):
                         if g['name'] == gname:
-                            vid_group_map[gname] = g['pk']
+                            group_map[gname] = g['pk']
                 except Exception:
                     pass
 
+            admin_group_pk = group_map.get('authentik Admins')
             users = []
             page = 1
             while True:
                 result = _ak_get(f'core/users/?page={page}&page_size=100&ordering=username')
                 for u in result.get('results', []):
                     user_groups = []
+                    is_admin = False
                     for g in (u.get('groups_obj') or []):
-                        if g.get('name') in vid_group_map:
-                            user_groups.append(g['name'])
+                        gn = g.get('name', '')
+                        if gn in group_map:
+                            user_groups.append(gn)
+                        if gn == 'authentik Admins':
+                            is_admin = True
                     users.append({
                         'pk': u['pk'],
                         'username': u.get('username', ''),
                         'name': u.get('name', ''),
                         'email': u.get('email', ''),
                         'groups': user_groups,
+                        'role': 'admin' if is_admin else 'viewer',
                         'is_active': u.get('is_active', True),
                     })
                 pagination = result.get('pagination', {})
@@ -149,7 +167,8 @@ def apply_ldap_overlay(app):
             return jsonify({
                 'users': users,
                 'available_groups': list(VID_GROUPS),
-                'group_pks': vid_group_map,
+                'group_pks': group_map,
+                'admin_group_pk': admin_group_pk,
             })
         except Exception as e:
             return jsonify({'error': str(e)[:200]}), 500
@@ -180,9 +199,73 @@ def apply_ldap_overlay(app):
         except Exception as e:
             return jsonify({'error': str(e)[:200]}), 500
 
+    @app.route('/api/stream-access/edit-user', methods=['POST'])
+    def api_edit_user():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            data = request.get_json()
+            user_pk = data['user_pk']
+            payload = {}
+            if 'name' in data:
+                payload['name'] = data['name']
+            if 'email' in data:
+                payload['email'] = data['email']
+            if not payload:
+                return jsonify({'error': 'Nothing to update'}), 400
+            _ak_patch(f'core/users/{user_pk}/', payload)
+            return jsonify({'ok': True})
+        except urllib.error.HTTPError as e:
+            body = ''
+            try:
+                body = e.read().decode()[:300]
+            except Exception:
+                pass
+            return jsonify({'error': f'Authentik API {e.code}: {body}'}), 502
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
+
+    @app.route('/api/stream-access/toggle-active', methods=['POST'])
+    def api_toggle_active():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            data = request.get_json()
+            user_pk = data['user_pk']
+            is_active = data['is_active']
+            _ak_patch(f'core/users/{user_pk}/', {'is_active': is_active})
+            return jsonify({'ok': True})
+        except urllib.error.HTTPError as e:
+            body = ''
+            try:
+                body = e.read().decode()[:300]
+            except Exception:
+                pass
+            return jsonify({'error': f'Authentik API {e.code}: {body}'}), 502
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
+
+    @app.route('/api/stream-access/delete-user', methods=['POST'])
+    def api_delete_user():
+        if session.get('role') != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        try:
+            data = request.get_json()
+            user_pk = data['user_pk']
+            _ak_delete(f'core/users/{user_pk}/')
+            return jsonify({'ok': True})
+        except urllib.error.HTTPError as e:
+            body = ''
+            try:
+                body = e.read().decode()[:300]
+            except Exception:
+                pass
+            return jsonify({'error': f'Authentik API {e.code}: {body}'}), 502
+        except Exception as e:
+            return jsonify({'error': str(e)[:200]}), 500
+
     # ── Sidebar injection ───────────────────────────────────────────────
-    # Replace "Web Users" sidebar item with "Stream Access" link and hide
-    # standalone auth-related UI elements when in LDAP mode.
+    # Rename "Stream Access" to "Web Users" and hide Account.
 
     @app.after_request
     def _inject_ldap_sidebar(response):
@@ -201,8 +284,8 @@ def apply_ldap_overlay(app):
                 'document.addEventListener("DOMContentLoaded",function(){'
                 'document.querySelectorAll(".sidebar-item").forEach(function(b){'
                 'var t=b.textContent||"";'
-                'if(t.indexOf("Web Users")!==-1){'
-                'b.innerHTML=\'<span class="sidebar-label">Stream Access</span>\';'
+                'if(t.indexOf("Stream Access")!==-1){'
+                'b.innerHTML=\'<span class="sidebar-label">Web Users</span>\';'
                 'b.onclick=function(e){e.preventDefault();window.location.href="/stream-access"};'
                 '}'
                 'if(t.indexOf("Account")!==-1){b.style.display="none"}'
@@ -310,7 +393,7 @@ STREAM_ACCESS_HTML = r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Stream Access — MediaMTX</title>
+<title>Web Users — MediaMTX</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -319,60 +402,84 @@ STREAM_ACCESS_HTML = r'''<!DOCTYPE html>
   --text:#e0e0e0;--text-dim:#888;--text-faint:#555;
   --accent:#00bcd4;--accent-hover:#00acc1;
   --admin:#f59e0b;--private:#3b82f6;--public:#22c55e;
-  --danger:#ef4444;--success:#22c55e;
+  --danger:#ef4444;--success:#22c55e;--warning:#f59e0b;
 }
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
-
-/* Header */
 .header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
-.header-left{display:flex;align-items:center;gap:14px}
 .header-left h1{font-size:20px;font-weight:600;letter-spacing:-0.3px}
 .header-left .subtitle{color:var(--text-dim);font-size:13px}
 .back-link{color:var(--accent);text-decoration:none;font-size:13px;display:flex;align-items:center;gap:4px;padding:6px 12px;border-radius:6px;transition:background .15s}
 .back-link:hover{background:rgba(0,188,212,.1)}
-
-/* Container */
-.container{max-width:1100px;margin:0 auto;padding:24px}
-
-/* Search */
-.search-bar{position:relative;margin-bottom:20px}
-.search-bar input{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px 12px 44px;color:var(--text);font-size:14px;outline:none;transition:border-color .15s}
+.container{max-width:1200px;margin:0 auto;padding:24px}
+.info-box{background:rgba(0,188,212,.08);border:1px solid rgba(0,188,212,.25);border-radius:8px;padding:16px 20px;margin-bottom:20px;font-size:13px;line-height:1.7}
+.info-box strong{color:var(--accent)}
+.search-row{display:flex;gap:12px;margin-bottom:20px;align-items:center;flex-wrap:wrap}
+.search-bar{position:relative;flex:1;min-width:240px}
+.search-bar input{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px 10px 40px;color:var(--text);font-size:13px;outline:none;transition:border-color .15s}
 .search-bar input:focus{border-color:var(--accent)}
 .search-bar input::placeholder{color:var(--text-faint)}
-.search-bar .search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text-faint);font-size:20px}
-
-/* Stats bar */
-.stats{display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap}
-.stat-chip{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 14px;font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:6px}
-.stat-chip .num{color:var(--text);font-weight:600;font-size:14px}
+.search-bar .si{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-faint);font-size:20px}
+.page-info{font-size:12px;color:var(--text-dim)}
+.page-info em{color:var(--success);font-style:normal}
 
 /* Table */
-.user-table{width:100%;border-collapse:separate;border-spacing:0}
-.user-table thead th{text-align:left;padding:10px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--text-dim);border-bottom:1px solid var(--border);position:sticky;top:63px;background:var(--bg);z-index:10}
-.user-table tbody tr{transition:background .1s}
-.user-table tbody tr:hover{background:var(--surface)}
-.user-table td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
-.user-cell{display:flex;align-items:center;gap:10px}
-.user-avatar{width:32px;height:32px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;color:var(--accent);text-transform:uppercase;flex-shrink:0}
-.user-name{font-weight:500;font-size:14px}
-.user-email{color:var(--text-dim);font-size:12px}
-.user-inactive{opacity:.45}
+table{width:100%;border-collapse:collapse}
+thead th{text-align:left;padding:10px 12px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;white-space:nowrap}
+thead th:hover{color:var(--text)}
+thead th .sort{font-size:12px;margin-left:2px}
+tbody tr{transition:background .1s}
+tbody tr:hover{background:var(--surface)}
+tbody td{padding:12px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle;font-size:13px}
+.user-inactive td{opacity:.5}
 
-/* Group badges */
-.groups-cell{display:flex;gap:6px;flex-wrap:wrap}
-.group-badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;user-select:none;border:1.5px solid transparent;display:flex;align-items:center;gap:4px}
-.group-badge .material-symbols-outlined{font-size:14px}
-.group-badge.active.vid_admin{background:rgba(245,158,11,.15);color:var(--admin);border-color:rgba(245,158,11,.35)}
-.group-badge.active.vid_private{background:rgba(59,130,246,.15);color:var(--private);border-color:rgba(59,130,246,.35)}
-.group-badge.active.vid_public{background:rgba(34,197,94,.15);color:var(--public);border-color:rgba(34,197,94,.35)}
-.group-badge.inactive{background:transparent;color:var(--text-faint);border-color:var(--border)}
-.group-badge.inactive:hover{border-color:var(--text-dim);color:var(--text-dim)}
-.group-badge.active:hover{filter:brightness(1.2)}
-.group-badge.loading{opacity:.5;pointer-events:none}
-.no-groups{color:var(--text-faint);font-size:12px;font-style:italic}
+/* Action buttons */
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+.btn{padding:5px 12px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;border:none;transition:filter .15s;color:#fff}
+.btn:hover{filter:brightness(1.2)}
+.btn-edit{background:#3b82f6}
+.btn-disable{background:#a855f7}
+.btn-enable{background:#22c55e}
+.btn-delete{background:#ef4444}
+.btn-sm{padding:3px 8px;font-size:10px}
+
+/* Role badge */
+.role-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.role-admin{background:rgba(0,188,212,.15);color:var(--accent)}
+.role-viewer{background:rgba(136,136,136,.15);color:var(--text-dim)}
+.role-badge:hover{filter:brightness(1.3)}
+
+/* Status */
+.status-enabled{color:var(--success);font-weight:500;font-size:12px}
+.status-disabled{color:var(--danger);font-weight:500;font-size:12px}
+
+/* Stream group badges */
+.groups-cell{display:flex;gap:4px;flex-wrap:wrap}
+.gbadge{padding:3px 8px;border-radius:12px;font-size:10px;font-weight:600;cursor:pointer;transition:all .15s;user-select:none;border:1.5px solid transparent;display:inline-flex;align-items:center;gap:3px}
+.gbadge .material-symbols-outlined{font-size:12px}
+.gbadge.on.vid_admin{background:rgba(245,158,11,.15);color:var(--admin);border-color:rgba(245,158,11,.35)}
+.gbadge.on.vid_private{background:rgba(59,130,246,.15);color:var(--private);border-color:rgba(59,130,246,.35)}
+.gbadge.on.vid_public{background:rgba(34,197,94,.15);color:var(--public);border-color:rgba(34,197,94,.35)}
+.gbadge.off{background:transparent;color:var(--text-faint);border-color:var(--border)}
+.gbadge.off:hover{border-color:var(--text-dim);color:var(--text-dim)}
+.gbadge.on:hover{filter:brightness(1.2)}
+
+/* Modal */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;display:none;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:420px;max-width:90vw}
+.modal h3{font-size:16px;font-weight:600;margin-bottom:16px}
+.modal label{display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:4px;margin-top:12px;text-transform:uppercase;letter-spacing:.5px}
+.modal input{width:100%;background:#0e0e0e;border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px;outline:none}
+.modal input:focus{border-color:var(--accent)}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+.mbtn{padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:none;color:#fff}
+.mbtn-cancel{background:var(--surface2);color:var(--text-dim)}
+.mbtn-save{background:var(--accent)}
+.mbtn-delete{background:var(--danger)}
+.mbtn:hover{filter:brightness(1.15)}
 
 /* Toast */
-.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:8px;font-size:13px;z-index:1000;transform:translateY(100px);opacity:0;transition:all .3s ease}
+.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:8px;font-size:13px;z-index:300;transform:translateY(100px);opacity:0;transition:all .3s ease}
 .toast.show{transform:translateY(0);opacity:1}
 .toast.success{background:#16a34a;color:#fff}
 .toast.error{background:#dc2626;color:#fff}
@@ -381,33 +488,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .loading-overlay{display:flex;align-items:center;justify-content:center;min-height:300px;flex-direction:column;gap:12px;color:var(--text-dim)}
 .spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-
-/* Empty state */
 .empty-state{text-align:center;padding:60px 20px;color:var(--text-dim)}
 .empty-state .material-symbols-outlined{font-size:48px;margin-bottom:12px;color:var(--text-faint)}
-.empty-state p{font-size:14px}
-
-/* Legend */
-.legend{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px;margin-bottom:20px;display:flex;gap:24px;flex-wrap:wrap;align-items:center}
-.legend-title{font-size:12px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
-.legend-item{display:flex;align-items:center;gap:8px;font-size:13px}
-.legend-dot{width:10px;height:10px;border-radius:50%}
-.legend-dot.admin{background:var(--admin)}
-.legend-dot.private{background:var(--private)}
-.legend-dot.public{background:var(--public)}
-
-/* Responsive */
-@media(max-width:768px){
-  .header{flex-direction:column;gap:10px;align-items:flex-start}
-  .container{padding:16px}
-  .legend{flex-direction:column;align-items:flex-start;gap:8px}
-  .stats{flex-direction:column}
-  .user-table thead{display:none}
-  .user-table tbody tr{display:block;padding:12px;margin-bottom:8px;background:var(--surface);border-radius:8px;border:1px solid var(--border)}
-  .user-table td{display:block;padding:4px 0;border:none}
-  .user-table td:first-child{padding-bottom:8px}
-  .groups-cell{padding-top:8px}
-}
 </style>
 </head>
 <body>
@@ -415,35 +497,59 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 <div class="header">
   <div class="header-left">
     <div>
-      <h1>Stream Access</h1>
-      <div class="subtitle">Manage who can access MediaMTX streams</div>
+      <h1>Web Users</h1>
+      <div class="subtitle">Manage who can access this configuration editor</div>
     </div>
   </div>
-  <a href="/" class="back-link">
-    <span class="material-symbols-outlined" style="font-size:18px">arrow_back</span>
-    Back to Editor
-  </a>
+  <a href="/" class="back-link"><span class="material-symbols-outlined" style="font-size:18px">arrow_back</span> Back to Editor</a>
 </div>
 
 <div class="container">
-  <div class="legend">
-    <span class="legend-title">Groups</span>
-    <div class="legend-item"><span class="legend-dot admin"></span> <strong>vid_admin</strong> — Full config editor</div>
-    <div class="legend-item"><span class="legend-dot private"></span> <strong>vid_private</strong> — Private streams viewer</div>
-    <div class="legend-item"><span class="legend-dot public"></span> <strong>vid_public</strong> — Public streams viewer</div>
+  <div class="info-box">
+    <strong>User Roles:</strong><br>
+    <strong>Admin:</strong> Full access to all settings and configuration<br>
+    <strong>Viewer:</strong> Can only view Active Streams tab (perfect for customers)
   </div>
 
-  <div class="search-bar">
-    <span class="material-symbols-outlined search-icon">search</span>
-    <input type="text" id="search" placeholder="Search users by name, username, or email..." oninput="filterUsers()">
+  <div class="search-row">
+    <div class="search-bar">
+      <span class="material-symbols-outlined si">search</span>
+      <input type="text" id="search" placeholder="Search username, email, or name..." oninput="filterUsers()">
+    </div>
+    <div class="page-info" id="page-info"></div>
   </div>
-
-  <div class="stats" id="stats"></div>
 
   <div id="content">
-    <div class="loading-overlay">
-      <div class="spinner"></div>
-      <div>Loading users from Authentik...</div>
+    <div class="loading-overlay"><div class="spinner"></div><div>Loading users from Authentik...</div></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="edit-modal">
+  <div class="modal">
+    <h3>Edit User</h3>
+    <label>Username</label>
+    <input type="text" id="edit-username" disabled style="opacity:.5">
+    <label>Name</label>
+    <input type="text" id="edit-name">
+    <label>Email</label>
+    <input type="email" id="edit-email">
+    <input type="hidden" id="edit-pk">
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('edit-modal')">Cancel</button>
+      <button class="mbtn mbtn-save" onclick="saveUser()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="delete-modal">
+  <div class="modal">
+    <h3 style="color:var(--danger)">Delete User</h3>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px">Are you sure you want to delete <strong id="delete-name" style="color:var(--text)"></strong>?</p>
+    <p style="font-size:12px;color:var(--text-faint)">This will permanently remove the user from Authentik. They will lose access to all services.</p>
+    <input type="hidden" id="delete-pk">
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('delete-modal')">Cancel</button>
+      <button class="mbtn mbtn-delete" onclick="confirmDelete()">Delete</button>
     </div>
   </div>
 </div>
@@ -454,9 +560,11 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 let allUsers = [];
 let groupPks = {};
 let availableGroups = [];
+let adminGroupPk = null;
+let sortCol = 'username';
+let sortAsc = true;
 
 async function loadUsers() {
-  const content = document.getElementById('content');
   try {
     const resp = await fetch('/api/stream-access/users');
     if (!resp.ok) throw new Error('API error ' + resp.status);
@@ -465,110 +573,194 @@ async function loadUsers() {
     allUsers = data.users;
     groupPks = data.group_pks;
     availableGroups = data.available_groups;
-    renderStats();
+    adminGroupPk = data.admin_group_pk || null;
     renderTable();
   } catch (err) {
-    content.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">error</span><p>Failed to load users: ' + escHtml(err.message) + '</p><p style="margin-top:8px;font-size:12px">Check that Authentik is running and the API token is valid.</p></div>';
+    document.getElementById('content').innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">error</span><p>Failed to load users: ' + esc(err.message) + '</p></div>';
   }
 }
 
-function renderStats() {
-  const active = allUsers.filter(u => u.is_active).length;
-  const admins = allUsers.filter(u => u.groups.includes('vid_admin')).length;
-  const priv = allUsers.filter(u => u.groups.includes('vid_private')).length;
-  const pub = allUsers.filter(u => u.groups.includes('vid_public')).length;
-  const noAccess = allUsers.filter(u => u.groups.length === 0).length;
-  document.getElementById('stats').innerHTML =
-    '<div class="stat-chip"><span class="num">' + active + '</span> active users</div>' +
-    '<div class="stat-chip"><span class="num" style="color:var(--admin)">' + admins + '</span> admins</div>' +
-    '<div class="stat-chip"><span class="num" style="color:var(--private)">' + priv + '</span> private</div>' +
-    '<div class="stat-chip"><span class="num" style="color:var(--public)">' + pub + '</span> public</div>' +
-    '<div class="stat-chip"><span class="num" style="color:var(--text-faint)">' + noAccess + '</span> no stream access</div>';
+function sortBy(col) {
+  if (sortCol === col) { sortAsc = !sortAsc; } else { sortCol = col; sortAsc = true; }
+  renderTable();
+}
+
+function getFiltered() {
+  const q = (document.getElementById('search').value || '').toLowerCase();
+  let list = allUsers;
+  if (q) list = list.filter(u => u.username.toLowerCase().includes(q) || (u.name||'').toLowerCase().includes(q) || (u.email||'').toLowerCase().includes(q));
+  list.sort((a,b) => {
+    let va = (a[sortCol]||'').toString().toLowerCase(), vb = (b[sortCol]||'').toString().toLowerCase();
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+  return list;
 }
 
 function renderTable() {
-  const q = (document.getElementById('search').value || '').toLowerCase();
-  let filtered = allUsers;
-  if (q) {
-    filtered = allUsers.filter(u =>
-      u.username.toLowerCase().includes(q) ||
-      (u.name || '').toLowerCase().includes(q) ||
-      (u.email || '').toLowerCase().includes(q)
-    );
-  }
+  const filtered = getFiltered();
+  const total = allUsers.length;
+  document.getElementById('page-info').innerHTML = '<em>Showing ' + filtered.length + ' of ' + total + ' user(s).</em>';
   if (filtered.length === 0) {
-    document.getElementById('content').innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">person_off</span><p>' + (q ? 'No users match your search.' : 'No users found in Authentik.') + '</p></div>';
+    document.getElementById('content').innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">person_off</span><p>No users found.</p></div>';
     return;
   }
-  let html = '<table class="user-table"><thead><tr><th>User</th><th>Email</th><th>Stream Groups (click to toggle)</th></tr></thead><tbody>';
+  const arrow = function(col) { return sortCol === col ? (sortAsc ? ' \u25B2' : ' \u25BC') : ''; };
+  let h = '<table><thead><tr>';
+  h += '<th onclick="sortBy(\'username\')">Username<span class="sort">' + arrow('username') + '</span></th>';
+  h += '<th onclick="sortBy(\'name\')">Name<span class="sort">' + arrow('name') + '</span></th>';
+  h += '<th onclick="sortBy(\'email\')">Email<span class="sort">' + arrow('email') + '</span></th>';
+  h += '<th onclick="sortBy(\'role\')">Role<span class="sort">' + arrow('role') + '</span></th>';
+  h += '<th>Status</th>';
+  h += '<th>Stream Groups</th>';
+  h += '<th>Actions</th>';
+  h += '</tr></thead><tbody>';
   for (const u of filtered) {
-    const cls = u.is_active ? '' : ' class="user-inactive"';
-    const initial = (u.username || '?')[0];
-    const displayName = u.name || u.username;
-    html += '<tr' + cls + '><td><div class="user-cell"><div class="user-avatar">' + escHtml(initial) + '</div><div><div class="user-name">' + escHtml(displayName) + '</div><div style="color:var(--text-dim);font-size:12px">@' + escHtml(u.username) + '</div></div></div></td>';
-    html += '<td><span style="font-size:13px;color:var(--text-dim)">' + escHtml(u.email || '—') + '</span></td>';
-    html += '<td><div class="groups-cell">';
-    if (availableGroups.length === 0) {
-      html += '<span class="no-groups">No vid_* groups created</span>';
-    } else {
-      for (const g of availableGroups) {
-        const active = u.groups.includes(g);
-        const cls2 = 'group-badge ' + (active ? 'active' : 'inactive') + ' ' + g;
-        const icon = active ? 'check_circle' : 'add_circle_outline';
-        html += '<span class="' + cls2 + '" data-user="' + u.pk + '" data-group="' + g + '" onclick="toggleGroup(this,' + u.pk + ',\'' + g + '\',' + active + ')">';
-        html += '<span class="material-symbols-outlined">' + icon + '</span>' + g.replace('vid_', '');
-        html += '</span>';
-      }
+    const rc = u.is_active ? '' : ' class="user-inactive"';
+    h += '<tr' + rc + '>';
+    h += '<td><strong>' + esc(u.username) + '</strong></td>';
+    h += '<td>' + esc(u.name || '\u2014') + '</td>';
+    h += '<td style="color:var(--text-dim)">' + esc(u.email || '\u2014') + '</td>';
+    const isAdmin = u.role === 'admin';
+    h += '<td><span class="role-badge ' + (isAdmin ? 'role-admin' : 'role-viewer') + '"' + (adminGroupPk ? ' onclick="toggleRole(this,\'' + u.pk + '\',' + isAdmin + ')"' : '') + '>' + (isAdmin ? 'Admin' : 'Viewer') + '</span></td>';
+    h += '<td><span class="' + (u.is_active ? 'status-enabled' : 'status-disabled') + '">' + (u.is_active ? 'Enabled' : 'Disabled') + '</span></td>';
+    h += '<td><div class="groups-cell">';
+    for (const g of availableGroups) {
+      const on = u.groups.includes(g);
+      h += '<span class="gbadge ' + (on ? 'on' : 'off') + ' ' + g + '" onclick="toggleGroup(this,\'' + u.pk + '\',\'' + g + '\',' + on + ')">';
+      h += '<span class="material-symbols-outlined">' + (on ? 'check_circle' : 'add_circle_outline') + '</span>' + g.replace('vid_','');
+      h += '</span>';
     }
-    html += '</div></td></tr>';
+    h += '</div></td>';
+    h += '<td><div class="actions">';
+    h += '<button class="btn btn-edit" onclick="openEdit(\'' + u.pk + '\')">Edit</button>';
+    if (u.is_active) {
+      h += '<button class="btn btn-disable" onclick="toggleActive(\'' + u.pk + '\',false)">Disable</button>';
+    } else {
+      h += '<button class="btn btn-enable" onclick="toggleActive(\'' + u.pk + '\',true)">Enable</button>';
+    }
+    h += '<button class="btn btn-delete" onclick="openDelete(\'' + u.pk + '\')">Delete</button>';
+    h += '</div></td></tr>';
   }
-  html += '</tbody></table>';
-  document.getElementById('content').innerHTML = html;
+  h += '</tbody></table>';
+  document.getElementById('content').innerHTML = h;
 }
 
 function filterUsers() { renderTable(); }
 
-async function toggleGroup(el, userPk, groupName, currentlyActive) {
-  const gPk = groupPks[groupName];
-  if (!gPk) { showToast('Group not found: ' + groupName, 'error'); return; }
-  el.classList.add('loading');
+/* ── Role toggle ── */
+async function toggleRole(el, userPk, currentlyAdmin) {
+  if (!adminGroupPk) { toast('authentik Admins group not found','error'); return; }
   try {
     const resp = await fetch('/api/stream-access/toggle-group', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({user_pk: userPk, group_pk: gPk, action: currentlyActive ? 'remove' : 'add'})
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_pk:userPk, group_pk:adminGroupPk, action:currentlyAdmin?'remove':'add'})
     });
     const data = await resp.json();
-    if (!resp.ok || data.error) throw new Error(data.error || 'API error');
-    const user = allUsers.find(u => u.pk === userPk);
-    if (user) {
-      if (currentlyActive) {
-        user.groups = user.groups.filter(g => g !== groupName);
-      } else {
-        user.groups.push(groupName);
-      }
-    }
-    renderStats();
+    if (!resp.ok || data.error) throw new Error(data.error||'API error');
+    const u = allUsers.find(x => x.pk == userPk);
+    if (u) { u.role = currentlyAdmin ? 'viewer' : 'admin'; }
     renderTable();
-    showToast((currentlyActive ? 'Removed from ' : 'Added to ') + groupName, 'success');
-  } catch (err) {
-    showToast('Failed: ' + err.message, 'error');
-    el.classList.remove('loading');
-  }
+    toast(currentlyAdmin ? 'Changed to Viewer' : 'Promoted to Admin', 'success');
+  } catch (err) { toast('Failed: '+err.message,'error'); }
 }
 
-function showToast(msg, type) {
+/* ── Group toggle ── */
+async function toggleGroup(el, userPk, groupName, on) {
+  const gPk = groupPks[groupName];
+  if (!gPk) { toast('Group not found','error'); return; }
+  try {
+    const resp = await fetch('/api/stream-access/toggle-group', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_pk:userPk, group_pk:gPk, action:on?'remove':'add'})
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error||'API error');
+    const u = allUsers.find(x => x.pk == userPk);
+    if (u) { if (on) u.groups = u.groups.filter(g=>g!==groupName); else u.groups.push(groupName); }
+    renderTable();
+    toast((on?'Removed from ':'Added to ')+groupName,'success');
+  } catch (err) { toast('Failed: '+err.message,'error'); }
+}
+
+/* ── Edit ── */
+function openEdit(pk) {
+  const u = allUsers.find(x => x.pk == pk);
+  if (!u) return;
+  document.getElementById('edit-pk').value = u.pk;
+  document.getElementById('edit-username').value = u.username;
+  document.getElementById('edit-name').value = u.name || '';
+  document.getElementById('edit-email').value = u.email || '';
+  document.getElementById('edit-modal').classList.add('open');
+}
+async function saveUser() {
+  const pk = document.getElementById('edit-pk').value;
+  const name = document.getElementById('edit-name').value;
+  const email = document.getElementById('edit-email').value;
+  try {
+    const resp = await fetch('/api/stream-access/edit-user', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_pk:pk, name:name, email:email})
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error||'API error');
+    const u = allUsers.find(x => x.pk == pk);
+    if (u) { u.name = name; u.email = email; }
+    closeModal('edit-modal');
+    renderTable();
+    toast('User updated','success');
+  } catch (err) { toast('Failed: '+err.message,'error'); }
+}
+
+/* ── Disable / Enable ── */
+async function toggleActive(pk, activate) {
+  try {
+    const resp = await fetch('/api/stream-access/toggle-active', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_pk:pk, is_active:activate})
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error||'API error');
+    const u = allUsers.find(x => x.pk == pk);
+    if (u) u.is_active = activate;
+    renderTable();
+    toast(activate ? 'User enabled' : 'User disabled', 'success');
+  } catch (err) { toast('Failed: '+err.message,'error'); }
+}
+
+/* ── Delete ── */
+function openDelete(pk) {
+  const u = allUsers.find(x => x.pk == pk);
+  if (!u) return;
+  document.getElementById('delete-pk').value = u.pk;
+  document.getElementById('delete-name').textContent = u.username;
+  document.getElementById('delete-modal').classList.add('open');
+}
+async function confirmDelete() {
+  const pk = document.getElementById('delete-pk').value;
+  try {
+    const resp = await fetch('/api/stream-access/delete-user', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_pk:pk})
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error(data.error||'API error');
+    allUsers = allUsers.filter(u => u.pk != pk);
+    closeModal('delete-modal');
+    renderTable();
+    toast('User deleted','success');
+  } catch (err) { toast('Failed: '+err.message,'error'); }
+}
+
+/* ── Helpers ── */
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function toast(msg,type) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'toast ' + type + ' show';
-  setTimeout(() => { t.classList.remove('show'); }, 3000);
+  t.textContent = msg; t.className = 'toast ' + type + ' show';
+  setTimeout(()=>t.classList.remove('show'), 3000);
 }
-
-function escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
 loadUsers();
 </script>

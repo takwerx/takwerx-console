@@ -1654,7 +1654,7 @@ def run_takportal_deploy():
             "AUTHENTIK_URL": f"http://{server_ip}:9090",
             "AUTHENTIK_TOKEN": ak_token,
             "USERS_HIDDEN_PREFIXES": "ak-,adm_,nodered-,ma-",
-            "GROUPS_HIDDEN_PREFIXES": "authentik, MA -",
+            "GROUPS_HIDDEN_PREFIXES": "authentik, MA -, vid_",
             "USERS_ACTIONS_HIDDEN_PREFIXES": "",
             "GROUPS_ACTIONS_HIDDEN_PREFIXES": "",
             "DASHBOARD_AUTHENTIK_STATS_REFRESH_SECONDS": "300",
