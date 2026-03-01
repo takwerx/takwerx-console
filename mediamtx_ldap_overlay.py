@@ -462,25 +462,41 @@ ACTIVE_STREAMS_VIEWER_HTML = r'''<!DOCTYPE html>
 :root{
   --bg:#121212;--surface:#1e1e1e;--surface2:#2a2a2a;--border:#333;
   --text:#e0e0e0;--text-dim:#888;--text-faint:#555;
-  --accent:#00bcd4;--accent-hover:#00acc1;--success:#22c55e;
+  --accent:#00bcd4;--accent-hover:#00acc1;--success:#22c55e;--blue:#2196F3;--blue-hover:#1976D2;
 }
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
 .header{background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px}
 .header h1{font-size:20px;font-weight:600}
 .header .subtitle{color:var(--text-dim);font-size:13px;margin-top:4px}
-.container{max-width:800px;margin:0 auto;padding:24px}
+.container{max-width:900px;margin:0 auto;padding:24px}
 .stream-list{display:flex;flex-direction:column;gap:10px}
 .stream-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px}
 .stream-card.live{border-left:4px solid var(--success)}
+.stream-info{flex:1;min-width:0}
 .stream-name{font-weight:500;font-size:15px;font-family:monospace}
-.stream-badge{font-size:11px;color:var(--text-dim);text-transform:uppercase}
-.watch-link{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;background:var(--accent);color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:500;transition:background .15s}
-.watch-link:hover{background:var(--accent-hover)}
+.stream-meta{display:flex;align-items:center;gap:8px;margin-top:4px}
+.stream-badge{font-size:11px;color:var(--success);text-transform:uppercase;font-weight:600}
+.vis-badge{font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600}
+.vis-public{background:rgba(34,197,94,.15);color:var(--success)}
+.vis-private{background:rgba(59,130,246,.15);color:var(--blue)}
+.btn-group{display:flex;gap:8px;flex-shrink:0}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:background .15s,opacity .15s}
+.btn-watch{background:var(--success);color:#fff}
+.btn-watch:hover{background:#16a34a}
+.btn-copy{background:var(--blue);color:#fff}
+.btn-copy:hover{background:var(--blue-hover)}
 .loading{text-align:center;padding:48px 20px;color:var(--text-dim)}
 .spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty-state{text-align:center;padding:48px 20px;color:var(--text-dim)}
 .empty-state .material-symbols-outlined{font-size:42px;margin-bottom:12px;color:var(--text-faint)}
+.toast{position:fixed;top:20px;right:20px;background:var(--success);color:#fff;padding:10px 20px;border-radius:6px;font-weight:600;font-size:13px;z-index:10000;opacity:0;transition:opacity .2s}
+.toast.show{opacity:1}
+@media(max-width:640px){
+  .stream-card{flex-direction:column;align-items:stretch;gap:12px}
+  .btn-group{flex-direction:column}
+  .btn{justify-content:center;padding:12px 16px;font-size:15px}
+}
 </style>
 </head>
 <body>
@@ -493,32 +509,57 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     <div class="loading"><div class="spinner"></div><div>Loading streams...</div></div>
   </div>
 </div>
+<div id="toast" class="toast"></div>
 <script>
+function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+function showToast(msg){
+  var t=document.getElementById('toast');
+  t.textContent=msg;t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show')},2000);
+}
+
+function copyLink(name){
+  var url=window.location.origin+'/watch/'+encodeURIComponent(name);
+  navigator.clipboard.writeText(url).then(function(){showToast('Link copied!')}).catch(function(){
+    var inp=document.createElement('input');inp.value=url;document.body.appendChild(inp);inp.select();document.execCommand('copy');document.body.removeChild(inp);showToast('Link copied!');
+  });
+}
+
 (async function(){
-  const content = document.getElementById('content');
-  try {
-    const r = await fetch('/api/viewer/streams');
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'Failed to load streams');
-    const streams = (data.streams || []).filter(s => s.ready || s.available);
-    if (streams.length === 0) {
-      content.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">videocam_off</span><p>No active streams right now.</p><p style="margin-top:8px;font-size:13px">When someone publishes a stream, it will appear here.</p></div>';
+  var content=document.getElementById('content');
+  try{
+    var r=await fetch('/api/viewer/streams');
+    var data=await r.json();
+    if(!r.ok)throw new Error(data.error||'Failed to load streams');
+    var streams=(data.streams||[]).filter(function(s){return s.ready||s.available});
+    if(streams.length===0){
+      content.innerHTML='<div class="empty-state"><span class="material-symbols-outlined">videocam_off</span><p>No active streams right now.</p><p style="margin-top:8px;font-size:13px">When someone publishes a stream, it will appear here.</p></div>';
       return;
     }
-    const base = window.location.origin;
-    let html = '<div class="stream-list">';
-    for (const s of streams) {
-      const path = (s.name || '').replace(/^\/+|\/+$/g, '');
-      const url = path ? base + '/' + path + '/' : base + '/';
-      html += '<div class="stream-card live"><div><div class="stream-name">' + escapeHtml(s.name) + '</div><div class="stream-badge">Live</div></div><a href="' + escapeHtml(url) + '" class="watch-link" target="_blank" rel="noopener"><span class="material-symbols-outlined" style="font-size:18px">play_circle</span>Watch</a></div>';
+    var html='<div class="stream-list">';
+    for(var i=0;i<streams.length;i++){
+      var s=streams[i];
+      var name=s.name||'';
+      var vis=s.visibility||'public';
+      var watchUrl='/watch/'+encodeURIComponent(name);
+      html+='<div class="stream-card live">';
+      html+='<div class="stream-info">';
+      html+='<div class="stream-name">'+escapeHtml(name)+'</div>';
+      html+='<div class="stream-meta"><span class="stream-badge">Live</span>';
+      if(vis==='private'){html+='<span class="vis-badge vis-private">PRIVATE</span>';}
+      html+='</div></div>';
+      html+='<div class="btn-group">';
+      html+='<a href="'+escapeHtml(watchUrl)+'" class="btn btn-watch" target="_blank" rel="noopener"><span class="material-symbols-outlined" style="font-size:18px">play_circle</span>Watch</a>';
+      html+='<button class="btn btn-copy" onclick="copyLink(\''+escapeHtml(name).replace(/'/g,"\\'")+'\')"><span class="material-symbols-outlined" style="font-size:18px">link</span>Copy Link</button>';
+      html+='</div></div>';
     }
-    html += '</div>';
-    content.innerHTML = html;
-  } catch (err) {
-    content.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">error</span><p>' + escapeHtml(err.message) + '</p></div>';
+    html+='</div>';
+    content.innerHTML=html;
+  }catch(err){
+    content.innerHTML='<div class="empty-state"><span class="material-symbols-outlined">error</span><p>'+escapeHtml(err.message)+'</p></div>';
   }
 })();
-function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 </script>
 </body>
 </html>
