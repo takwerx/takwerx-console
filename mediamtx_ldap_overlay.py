@@ -210,7 +210,10 @@ def apply_ldap_overlay(app):
                 '});'
                 '</script>'
             )
-            html = html.replace('</body>', script + '</body>')
+            idx = html.rfind('</body>')
+            if idx == -1:
+                return response
+            html = html[:idx] + script + html[idx:]
             response.set_data(html)
             response.headers['Content-Length'] = len(response.get_data())
         except Exception:

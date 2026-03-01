@@ -2226,8 +2226,12 @@ WantedBy=multi-user.target
             # Console-deployed MediaMTX uses API port 9898 (CloudTAK uses 9997). Patch editor so "active streams" works.
             subprocess.run(f"sed -i 's/9997/9898/g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
             # When CloudTAK is installed, MediaMTX is at stream.* so "Stream URLs" in the editor should show stream. not video.
+            # Only replace URL-like patterns (//video. or video.<domain>) — not JS vars like video.src / video.canPlayType
             if domain:
-                subprocess.run(f"sed -i 's/video\\./stream./g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+                base = domain.split(':')[0]
+                base_esc = base.replace('.', '\\.')
+                subprocess.run(f"sed -i 's|video\\.{base_esc}|stream.{base_esc}|g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
+                subprocess.run(f"sed -i 's|//video\\.|//stream.|g' {webeditor_dir}/mediamtx_config_editor.py", shell=True)
                 plog("  Stream URL host set to stream.*")
             plog("✓ Web editor installed (port 5080, API 9898)")
 
