@@ -3965,7 +3965,8 @@ def _ensure_app_access_policies(ak_url, ak_headers, plog=None):
                 policy_pk = data['pk']
                 _log(f"  ✓ Created policy: {policy_name}")
             except urllib.error.HTTPError as e:
-                if e.code == 404:
+                if e.code in (404, 405):
+                    # 404 = no group_membership endpoint; 405 = endpoint exists but POST not allowed (newer Authentik)
                     try:
                         data = _api_post('policies/expression/', {
                             'name': policy_name,
