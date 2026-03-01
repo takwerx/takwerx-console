@@ -141,6 +141,31 @@ def apply_ldap_overlay(app):
             pass
         return {'domain': None, 'protocol': 'http'}
 
+    # ── HLS proxy (routes HLS through Caddy/Flask so port 8888 isn't needed) ──
+
+    @app.route('/hls-proxy/<path:subpath>')
+    def hls_proxy(subpath):
+        if session.get('role') not in ('viewer', 'admin'):
+            return 'Unauthorized', 403
+        cred = _get_hlsviewer_credential()
+        hls_port = 8888
+        url = f'http://127.0.0.1:{hls_port}/{subpath}'
+        try:
+            headers = {'Accept': '*/*'}
+            if cred:
+                import base64
+                auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
+                headers['Authorization'] = f'Basic {auth}'
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+                ct = resp.headers.get('Content-Type', 'application/octet-stream')
+                r = Response(data, content_type=ct)
+                r.headers['Cache-Control'] = 'no-cache'
+                return r
+        except Exception as e:
+            return str(e)[:200], 502
+
     # ── Active Streams viewer page (vid_public / vid_private) ────────────
 
     @app.route('/viewer')
@@ -569,11 +594,37 @@ td{padding:12px;border-top:1px solid #333}
 function escapeHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 
 function watchStream(name){
-  var url='/watch/'+encodeURIComponent(name);
+  var hlsUrl='/hls-proxy/'+encodeURIComponent(name)+'/index.m3u8';
   var w=1280,h=720,l=(screen.width-w)/2,t=(screen.height-h)/2;
-  var popup=window.open(url,'streamViewer_'+name,
+  var popup=window.open('','streamViewer_'+name,
     'width='+w+',height='+h+',left='+l+',top='+t+',toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=no,resizable=yes');
-  if(!popup)window.open(url,'_blank');
+  if(!popup){window.open('/watch/'+encodeURIComponent(name),'_blank');return;}
+  var title=escapeHtml(name)+' - Live';
+  popup.document.write('<!DOCTYPE html><html><head><title>'+title+'</title>'
+    +'<style>*{margin:0;padding:0}body{background:#000;overflow:hidden}'
+    +'#v{width:100vw;height:100vh;object-fit:contain}'
+    +'#err{display:none;position:fixed;top:0;left:0;width:100%;height:100%;'
+    +'background:rgba(0,0,0,.95);z-index:100;justify-content:center;align-items:center;'
+    +'flex-direction:column;text-align:center;color:#fff;font-family:sans-serif}'
+    +'#err h2{font-size:1.4rem;margin-bottom:8px}#err p{color:#999;font-size:.9rem}</style>'
+    +'<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script></head><body>'
+    +'<video id="v" controls autoplay muted playsinline></video>'
+    +'<div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>'
+    +'<script>'
+    +'var video=document.getElementById("v"),err=document.getElementById("err");'
+    +'var url="'+hlsUrl+'";'
+    +'function start(){'
+    +'if(Hls.isSupported()){'
+    +'var hls=new Hls({enableWorker:true,lowLatencyMode:true,backBufferLength:90});'
+    +'hls.loadSource(url);hls.attachMedia(video);'
+    +'hls.on(Hls.Events.MANIFEST_PARSED,function(){err.style.display="none";video.play().catch(function(){})});'
+    +'hls.on(Hls.Events.ERROR,function(ev,data){if(data.fatal){err.style.display="flex";setTimeout(function(){hls.destroy();start()},5000)}});'
+    +'}else if(video.canPlayType("application/vnd.apple.mpegurl")){'
+    +'video.src=url;video.addEventListener("loadedmetadata",function(){video.play().catch(function(){})});'
+    +'}}'
+    +'start();'
+    +'<\/script></body></html>');
+  popup.document.close();
 }
 
 function copyLink(name){
@@ -604,7 +655,6 @@ function showCopied(e){
       var s=streams[i];
       var name=s.name||'';
       var vis=s.visibility||'public';
-      var hlsUrl=s.hls_url||'';
       html+='<tr>';
       html+='<td><span class="stream-name">'+escapeHtml(name)+'</span><span class="badge-live">Live</span>';
       if(vis==='private')html+='<span class="badge-private">Private</span>';
