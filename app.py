@@ -2436,7 +2436,7 @@ WantedBy=multi-user.target
                     plog("━━━ Creating Authentik groups for stream access ━━━")
                     ak_url = 'http://127.0.0.1:9090'
                     ak_headers = {'Authorization': f'Bearer {ak_token}', 'Content-Type': 'application/json'}
-                    for group_name in ('vid_public', 'vid_private', 'vid_admin'):
+                    for group_name in ('vid_public', 'vid_private'):
                         try:
                             req = urllib.request.Request(f'{ak_url}/api/v3/core/groups/',
                                 data=json.dumps({'name': group_name, 'is_superuser': False}).encode(),

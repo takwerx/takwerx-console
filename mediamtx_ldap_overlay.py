@@ -17,8 +17,8 @@ from flask import session, request, redirect, jsonify, Response
 
 AK_URL = os.environ.get('AUTHENTIK_API_URL', 'http://127.0.0.1:9090')
 AK_TOKEN = os.environ.get('AUTHENTIK_TOKEN', '')
-VID_GROUPS = ('vid_admin', 'vid_private', 'vid_public')
-ADMIN_GROUPS = frozenset({'vid_admin', 'authentik Admins'})
+VID_GROUPS = ('vid_private', 'vid_public')
+ADMIN_GROUPS = frozenset({'authentik Admins'})
 VIEWER_GROUPS = frozenset({'vid_private', 'vid_public'})
 
 
