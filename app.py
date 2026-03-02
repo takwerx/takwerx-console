@@ -4757,7 +4757,20 @@ function pollLog() {
         }
         if (!d.running) {
           clearInterval(logInterval);
-          if (d.complete) setTimeout(() => location.reload(), 1500);
+          if (d.complete) {
+            var btn = document.getElementById('deploy-btn');
+            if (btn) { btn.textContent = '✓ Deployment Complete'; btn.style.background = 'var(--green)'; btn.style.opacity = '1'; btn.style.cursor = 'default'; }
+            var box = document.getElementById('deploy-log');
+            var refreshBtn = document.createElement('button');
+            refreshBtn.textContent = '↻ Refresh Page';
+            refreshBtn.style.cssText = 'display:block;width:100%;padding:12px;margin-top:16px;background:linear-gradient(135deg,#1e40af,#0e7490);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;';
+            refreshBtn.onclick = function() { window.location.href = '/mediamtx'; };
+            box.appendChild(refreshBtn);
+            box.scrollTop = box.scrollHeight;
+          } else if (d.error) {
+            var btn = document.getElementById('deploy-btn');
+            if (btn) { btn.textContent = '✗ Deployment Failed'; btn.style.background = 'var(--red)'; btn.style.opacity = '1'; btn.disabled = false; btn.onclick = function() { btn.textContent = '🚀 Deploy MediaMTX'; btn.style.background = ''; startDeploy(); }; }
+          }
         }
       });
   }, 800);
@@ -4818,6 +4831,8 @@ function doUninstall() {
 }
 
 {% if deploying %}
+document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
+{% elif deploy_done %}
 document.addEventListener('DOMContentLoaded', () => { logIndex = 0; pollLog(); });
 {% endif %}
 </script>
