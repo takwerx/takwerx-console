@@ -4098,7 +4098,8 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                 log(f"  ✓ Proxy provider created: {name}")
             except Exception as e:
                 if hasattr(e, 'code') and e.code == 400:
-                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={slug}', headers=_ak_headers)
+                    import urllib.parse as _uparse
+                    req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={_uparse.quote(name)}', headers=_ak_headers)
                     resp = _urlreq.urlopen(req, timeout=10)
                     results = json.loads(resp.read().decode())['results']
                     if results:
@@ -4116,9 +4117,39 @@ def _ensure_authentik_console_app(fqdn, ak_token, plog=None, flow_pk=None, inv_f
                     log(f"  ✓ Application created: {name}")
                 except Exception as e:
                     if hasattr(e, 'code') and e.code == 400:
+                        try:
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/{slug}/',
+                                data=json.dumps({'provider': pk}).encode(),
+                                headers=_ak_headers, method='PATCH')
+                            _urlreq.urlopen(req, timeout=10)
+                        except Exception:
+                            pass
                         log(f"  ✓ Application already exists: {name}")
                     else:
                         log(f"  ⚠ Application error: {str(e)[:80]}")
+
+        for name, slug, host in entries:
+            try:
+                req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/{slug}/', headers=_ak_headers)
+                _urlreq.urlopen(req, timeout=10)
+            except Exception as e:
+                if hasattr(e, 'code') and e.code == 404:
+                    import urllib.parse as _uparse
+                    try:
+                        req = _urlreq.Request(f'{_ak_url}/api/v3/providers/proxy/?search={_uparse.quote(name)}', headers=_ak_headers)
+                        resp = _urlreq.urlopen(req, timeout=10)
+                        results = json.loads(resp.read().decode())['results']
+                        if results:
+                            pk = results[0]['pk']
+                            req = _urlreq.Request(f'{_ak_url}/api/v3/core/applications/',
+                                data=json.dumps({'name': name, 'slug': slug, 'provider': pk}).encode(),
+                                headers=_ak_headers, method='POST')
+                            _urlreq.urlopen(req, timeout=10)
+                            if pk not in provider_pks:
+                                provider_pks.append(pk)
+                            log(f"  ✓ Application recreated: {name}")
+                    except Exception:
+                        pass
 
         if provider_pks:
             try:
@@ -9448,12 +9479,10 @@ body{display:flex;flex-direction:row;min-height:100vh}
 </div>
 {% elif ldap_connected %}
 <div class="card" style="border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.06);margin-bottom:24px">
-<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
-<div><span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span></div>
-<button type="button" id="fix-ldap-btn" onclick="fixLdap()" style="padding:8px 16px;background:transparent;color:var(--text-secondary);border:1px solid var(--border);border-radius:6px;font-size:12px;cursor:pointer">Fix LDAP bindings</button>
+<div style="display:flex;align-items:center;gap:12px">
+<span style="color:var(--green);font-size:18px">✓</span><span style="font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--green);font-weight:600">LDAP Connected to Authentik</span>
 </div>
 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:8px">CoreConfig.xml patched · Service account: adm_ldapservice · Base DN: DC=takldap · Port 389</div>
-<div id="fix-ldap-msg" style="margin-top:8px;font-size:12px;color:var(--text-dim)"></div>
 </div>
 {% endif %}
 <div class="section-title">Access</div>
@@ -9608,20 +9637,6 @@ async function connectLdap(){
         else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
     }
     catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Connect TAK Server to LDAP';btn.style.opacity='1';}}
-}
-async function fixLdap(){
-    var btn=document.getElementById('fix-ldap-btn');
-    var msg=document.getElementById('fix-ldap-msg');
-    if(btn){btn.disabled=true;btn.textContent='Fixing...';btn.style.opacity='0.7';}
-    if(msg){msg.textContent='';msg.style.color='var(--text-secondary)';}
-    try{
-        var r=await fetch('/api/takserver/connect-ldap',{method:'POST',headers:{'Content-Type':'application/json'}});
-        var d=await r.json();
-        if(d.success){if(msg){msg.textContent=d.message||'Done.';msg.style.color='var(--green)';} setTimeout(function(){window.location.reload();},1500);}
-        else{if(msg){msg.textContent=d.message||'Failed';msg.style.color='var(--red)';}}
-        if(btn){btn.disabled=false;btn.textContent='Fix LDAP bindings';btn.style.opacity='1';}
-    }
-    catch(e){if(msg){msg.textContent='Error: '+e.message;msg.style.color='var(--red)';} if(btn){btn.disabled=false;btn.textContent='Fix LDAP bindings';btn.style.opacity='1';}}
 }
 
 (function(){
