@@ -1,16 +1,27 @@
 # infra-TAK Technical Handoff Document
 
-## 0. Current Session State (Last Updated: 2026-03-01)
+## 0. Current Session State (Last Updated: 2026-03-02)
 
 **This section is the single source of truth.** Update it when server state changes. This doc is a living handoff between machines -- only describe what is true right now.
 
-### CRITICAL: Active LDAP Bind Issue (Must Fix First)
+### LDAP Bind Issue — RESOLVED
 
-**Status:** LDAP bind fails with `Insufficient access (50)` / `"Access denied for user"`. This replaced a previous `exceeded stage recursion depth` error after fixing the LDAP flow stages. The password authentication itself now works (no more recursion), but the user is denied access to the LDAP provider.
+**Status:** LDAP bind is WORKING. Service account bind, user search, and TAK Server LDAP authentication all confirmed functional.
 
-**Server:** `root@ssdnodes-66871ef1e08d7` (63.250.55.132)
+**Server:** `root@responder` (190.102.110.224)
 
-**Impact:** TAK Server cannot authenticate users via LDAP. QR registration and all LDAP-based auth is broken until this is fixed. TAK Server is currently stopped (`sudo systemctl stop takserver`).
+**Root Cause (Authentik 2026.2.0 breaking change):**
+
+In Authentik 2026.2.0, the LDAP outpost reads the provider's `authorization_flow` as its `bind_flow_slug` — this is the flow used for LDAP bind operations. The `authentication_flow` field is NOT used by the outpost for binds.
+
+We had `authorization_flow` set to `default-provider-authorization-implicit-consent` (a consent-only flow with no identification/password/login stages). The outpost ran this flow for every bind, which never created an authenticated session. The follow-up `/api/v3/core/users/me/` call got 403 "Authentication credentials were not provided" because no session existed.
+
+**Fix:** Set `authorization_flow` on the LDAP provider to `ldap-authentication-flow` (the same flow used for `authentication_flow`). This flow has identification, password, and user login stages, so a proper session is created during bind.
+
+**What was also fixed along the way:**
+- Added "Allow LDAP Access" expression policy (`return True`) to the LDAP application (needed because `policy_engine_mode: any` with 0 bindings = deny all)
+- LDAP outpost image updated from 2025.12.4 to 2026.2.0 to match the server version
+- `AUTHENTIK_COOKIE_DOMAIN` restored to `.test.takwerx.com` (required for SSO across subdomains)
 
 **What was wrong (root cause identified and partially fixed):**
 
