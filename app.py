@@ -1759,43 +1759,39 @@ def run_takportal_deploy():
         else:
             plog("\u26a0 admin.p12 not found in /opt/tak/certs/files/")
             certs_copied = False
-        # Build a full CA bundle (intermediate + root) in standard PEM format.
-        # TAK Server uses a 3-tier chain: server -> intermediate CA -> root CA.
-        # Node.js needs the full chain in the CA option, and the certs MUST use
-        # standard "BEGIN CERTIFICATE" headers (not "BEGIN TRUSTED CERTIFICATE").
-        ca_bundle_path = '/tmp/tak-ca-bundle.pem'
-        int_ca = os.path.join(cert_dir, 'ca.pem')
-        root_ca = os.path.join(cert_dir, 'root-ca.pem')
-        bundle_parts = []
-        for ca_file in [int_ca, root_ca]:
-            if os.path.exists(ca_file):
-                with open(ca_file, 'r') as f:
-                    content = f.read().strip()
-                if 'BEGIN CERTIFICATE' in content and 'TRUSTED' not in content:
-                    bundle_parts.append(content)
-                    plog(f"  Added {os.path.basename(ca_file)} to CA bundle")
-                else:
-                    plog(f"  Skipped {os.path.basename(ca_file)} (not standard PEM)")
-        if bundle_parts:
-            with open(ca_bundle_path, 'w') as f:
-                f.write('\n'.join(bundle_parts) + '\n')
-            subprocess.run(f'docker cp {ca_bundle_path} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-            os.remove(ca_bundle_path)
-            plog(f"  CA bundle ({len(bundle_parts)} certs) -> data/certs/tak-ca.pem")
+        # Copy CA chain for TAK Portal. takserver.pem contains the full chain
+        # (server + intermediate + root) which is what TAK Portal expects.
+        # Fallback to building a bundle from ca.pem + root-ca.pem if needed.
+        tak_ca_src = None
+        takserver_pem = os.path.join(cert_dir, 'takserver.pem')
+        if os.path.exists(takserver_pem):
+            tak_ca_src = takserver_pem
+            plog(f"  Using takserver.pem (full chain)")
         else:
-            # Fallback: try any single CA file we can find
-            tak_ca_pem = None
-            for name in ['tak-ca.pem', 'ca.pem', 'root-ca.pem']:
-                p = os.path.join(cert_dir, name)
-                if os.path.exists(p):
-                    tak_ca_pem = p
-                    break
-            if tak_ca_pem:
-                subprocess.run(f'docker cp {tak_ca_pem} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-                plog(f"  Copied {os.path.basename(tak_ca_pem)} -> data/certs/tak-ca.pem (single file fallback)")
-            else:
-                plog("\u26a0 No CA cert files found in /opt/tak/certs/files/")
-                certs_copied = False
+            # Build bundle from individual CA files
+            int_ca = os.path.join(cert_dir, 'ca.pem')
+            root_ca = os.path.join(cert_dir, 'root-ca.pem')
+            bundle_parts = []
+            for ca_file in [int_ca, root_ca]:
+                if os.path.exists(ca_file):
+                    with open(ca_file, 'r') as f:
+                        content = f.read().strip()
+                    if 'BEGIN CERTIFICATE' in content and 'TRUSTED' not in content:
+                        bundle_parts.append(content)
+            if bundle_parts:
+                ca_bundle_path = '/tmp/tak-ca-bundle.pem'
+                with open(ca_bundle_path, 'w') as f:
+                    f.write('\n'.join(bundle_parts) + '\n')
+                tak_ca_src = ca_bundle_path
+                plog(f"  Built CA bundle from ca.pem + root-ca.pem ({len(bundle_parts)} certs)")
+        if tak_ca_src:
+            subprocess.run(f'docker cp {tak_ca_src} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
+            if tak_ca_src.startswith('/tmp/'):
+                os.remove(tak_ca_src)
+            plog(f"  -> data/certs/tak-ca.pem")
+        else:
+            plog("\u26a0 No CA cert files found in /opt/tak/certs/files/")
+            certs_copied = False
         if certs_copied:
             plog("\u2713 Certificates copied to container data volume")
 
