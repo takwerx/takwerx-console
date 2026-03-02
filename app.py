@@ -1738,44 +1738,66 @@ def run_takportal_deploy():
                 if os.path.exists(p):
                     tak_ca = p
                     break
-        # Create certs dir in container and copy
-        subprocess.run('docker exec tak-portal mkdir -p /usr/src/app/certs', shell=True, capture_output=True, text=True)
+        # Create certs dir in container data volume (persists across rebuilds)
+        subprocess.run('docker exec tak-portal mkdir -p /usr/src/app/data/certs', shell=True, capture_output=True, text=True)
         certs_copied = True
         if os.path.exists(webadmin_p12):
-            r = subprocess.run(f'docker cp {webadmin_p12} tak-portal:/usr/src/app/certs/admin.p12', shell=True, capture_output=True, text=True)
-            plog(f"  Copied {os.path.basename(webadmin_p12)} -> admin.p12")
+            # Re-encode P12 with modern encryption (AES-256-CBC) — TAK Server generates
+            # legacy RC2-40-CBC which Node.js 22+ / OpenSSL 3.x rejects
+            modern_p12 = '/tmp/tak-portal-admin-modern.p12'
+            r = subprocess.run(
+                f'openssl pkcs12 -in {webadmin_p12} -passin pass:atakatak -nodes -legacy 2>/dev/null | '
+                f'openssl pkcs12 -export -passout pass:atakatak -out {modern_p12}',
+                shell=True, capture_output=True, text=True, timeout=30)
+            if os.path.exists(modern_p12) and os.path.getsize(modern_p12) > 0:
+                subprocess.run(f'docker cp {modern_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', shell=True, capture_output=True, text=True)
+                os.remove(modern_p12)
+                plog(f"  Copied {os.path.basename(webadmin_p12)} -> data/certs/tak-client.p12 (re-encoded for modern OpenSSL)")
+            else:
+                subprocess.run(f'docker cp {webadmin_p12} tak-portal:/usr/src/app/data/certs/tak-client.p12', shell=True, capture_output=True, text=True)
+                plog(f"  Copied {os.path.basename(webadmin_p12)} -> data/certs/tak-client.p12 (legacy format, re-encode failed)")
         else:
             plog("\u26a0 admin.p12 not found in /opt/tak/certs/files/")
             certs_copied = False
-        # Export tak-ca.pem from truststore or copy directly
-        tak_ca_pem = os.path.join(cert_dir, 'tak-ca.pem')
-        if not os.path.exists(tak_ca_pem):
-            # Try to find any .pem CA file
-            for name in ['ca.pem', 'root-ca.pem', 'truststore-root.pem']:
+        # Build a full CA bundle (intermediate + root) in standard PEM format.
+        # TAK Server uses a 3-tier chain: server -> intermediate CA -> root CA.
+        # Node.js needs the full chain in the CA option, and the certs MUST use
+        # standard "BEGIN CERTIFICATE" headers (not "BEGIN TRUSTED CERTIFICATE").
+        ca_bundle_path = '/tmp/tak-ca-bundle.pem'
+        int_ca = os.path.join(cert_dir, 'ca.pem')
+        root_ca = os.path.join(cert_dir, 'root-ca.pem')
+        bundle_parts = []
+        for ca_file in [int_ca, root_ca]:
+            if os.path.exists(ca_file):
+                with open(ca_file, 'r') as f:
+                    content = f.read().strip()
+                if 'BEGIN CERTIFICATE' in content and 'TRUSTED' not in content:
+                    bundle_parts.append(content)
+                    plog(f"  Added {os.path.basename(ca_file)} to CA bundle")
+                else:
+                    plog(f"  Skipped {os.path.basename(ca_file)} (not standard PEM)")
+        if bundle_parts:
+            with open(ca_bundle_path, 'w') as f:
+                f.write('\n'.join(bundle_parts) + '\n')
+            subprocess.run(f'docker cp {ca_bundle_path} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
+            os.remove(ca_bundle_path)
+            plog(f"  CA bundle ({len(bundle_parts)} certs) -> data/certs/tak-ca.pem")
+        else:
+            # Fallback: try any single CA file we can find
+            tak_ca_pem = None
+            for name in ['tak-ca.pem', 'ca.pem', 'root-ca.pem']:
                 p = os.path.join(cert_dir, name)
                 if os.path.exists(p):
                     tak_ca_pem = p
                     break
-        if os.path.exists(tak_ca_pem):
-            r = subprocess.run(f'docker cp {tak_ca_pem} tak-portal:/usr/src/app/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-            plog(f"  Copied {os.path.basename(tak_ca_pem)} -> tak-ca.pem")
-        else:
-            plog("\u26a0 tak-ca.pem not found, trying to extract from truststore")
-            # Extract from Java truststore
-            ts = os.path.join(cert_dir, 'truststore-root.p12')
-            if os.path.exists(ts):
-                r = subprocess.run(f'openssl pkcs12 -in {ts} -clcerts -nokeys -passin pass:atakatak 2>/dev/null | openssl x509 > /tmp/tak-ca.pem', shell=True, capture_output=True, text=True)
-                if os.path.exists('/tmp/tak-ca.pem') and os.path.getsize('/tmp/tak-ca.pem') > 0:
-                    subprocess.run('docker cp /tmp/tak-ca.pem tak-portal:/usr/src/app/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
-                    plog("  Extracted and copied tak-ca.pem from truststore")
-                else:
-                    plog("\u26a0 Could not extract CA cert")
-                    certs_copied = False
+            if tak_ca_pem:
+                subprocess.run(f'docker cp {tak_ca_pem} tak-portal:/usr/src/app/data/certs/tak-ca.pem', shell=True, capture_output=True, text=True)
+                plog(f"  Copied {os.path.basename(tak_ca_pem)} -> data/certs/tak-ca.pem (single file fallback)")
             else:
-                plog("\u26a0 No CA cert found")
+                plog("\u26a0 No CA cert files found in /opt/tak/certs/files/")
                 certs_copied = False
         if certs_copied:
-            plog("\u2713 Certificates copied to container")
+            plog("\u2713 Certificates copied to container data volume")
 
         # Step 6: Auto-configure settings.json
         plog("")
@@ -1804,9 +1826,9 @@ def run_takportal_deploy():
             "AUTHENTIK_PUBLIC_URL": f"https://authentik.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:9090",
             "TAK_PORTAL_PUBLIC_URL": f"https://takportal.{settings['fqdn']}" if settings.get('fqdn') else f"http://{server_ip}:3000",
             "TAK_URL": f"https://tak.{settings['fqdn']}:8443/Marti" if settings.get('fqdn') else f"https://{server_ip}:8443/Marti",
-            "TAK_API_P12_PATH": "./certs/admin.p12",
+            "TAK_API_P12_PATH": "data/certs/tak-client.p12",
             "TAK_API_P12_PASSPHRASE": "atakatak",
-            "TAK_CA_PATH": "./certs/tak-ca.pem",
+            "TAK_CA_PATH": "data/certs/tak-ca.pem",
             "TAK_REVOKE_ON_DISABLE": "true",
             "TAK_DEBUG": "false",
             "TAK_BYPASS_ENABLED": "false",
