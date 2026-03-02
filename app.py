@@ -6502,6 +6502,19 @@ entries:
     state: present
     id: ldap-authentication-flow
   - attrs:
+      authentication: none
+      denied_action: message_continue
+      designation: authorization
+      layout: stacked
+      name: ldap-authorization-flow
+      policy_engine_mode: any
+      title: ldap-authorization-flow
+    identifiers:
+      slug: ldap-authorization-flow
+    model: authentik_flows.flow
+    state: present
+    id: ldap-authorization-flow
+  - attrs:
       backends:
       - authentik.core.auth.InbuiltBackend
       - authentik.core.auth.TokenBackend
@@ -6576,7 +6589,7 @@ entries:
       name: LDAP
     attrs:
       authentication_flow: !KeyOf ldap-authentication-flow
-      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      authorization_flow: !KeyOf ldap-authorization-flow
       base_dn: !Context basedn
       bind_mode: cached
       gid_start_number: 4000
@@ -7024,13 +7037,24 @@ entries:
                         ldap_provider_pk = None
                         ldap_flow_pk = next((f['pk'] for f in auth_flows if f['slug'] == 'ldap-authentication-flow'), None)
                         ldap_bind_flow = ldap_flow_pk or auth_flow_pk
-                        # authorization_flow must be an authorization-designated flow (not authentication)
+                        # authorization_flow must be an authorization-designated flow with authentication:none
+                        # (default-provider-authorization-implicit-consent has require_authenticated which blocks LDAP users)
+                        ldap_authz_flow = None
                         try:
                             _authz_req = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/?designation=authorization', headers=ak_headers)
                             _authz_resp = urllib.request.urlopen(_authz_req, timeout=10)
                             _authz_flows = json.loads(_authz_resp.read().decode())['results']
-                            ldap_authz_flow = next((f['pk'] for f in _authz_flows if 'implicit' in f.get('slug', '')), _authz_flows[0]['pk'] if _authz_flows else ldap_bind_flow)
+                            ldap_authz_flow = next((f['pk'] for f in _authz_flows if f.get('slug') == 'ldap-authorization-flow'), None)
+                            if not ldap_authz_flow:
+                                _new = urllib.request.Request(f'{ak_url}/api/v3/flows/instances/',
+                                    data=json.dumps({'name': 'ldap-authorization-flow', 'slug': 'ldap-authorization-flow',
+                                        'title': 'ldap-authorization-flow', 'designation': 'authorization',
+                                        'authentication': 'none', 'layout': 'stacked', 'denied_action': 'message_continue',
+                                        'policy_engine_mode': 'any'}).encode(), headers=ak_headers, method='POST')
+                                ldap_authz_flow = json.loads(urllib.request.urlopen(_new, timeout=10).read().decode())['pk']
                         except Exception:
+                            ldap_authz_flow = next((f['pk'] for f in _authz_flows if 'implicit' in f.get('slug', '')), None) if '_authz_flows' in dir() else None
+                        if not ldap_authz_flow:
                             ldap_authz_flow = ldap_bind_flow
                         try:
                             req = urllib.request.Request(f'{ak_url}/api/v3/providers/ldap/',
@@ -8025,10 +8049,21 @@ def _ensure_ldap_flow_authentication_none():
             providers = _get('providers/ldap/?search=LDAP').get('results', [])
             ldap_prov = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
             if ldap_prov:
-                # authorization_flow MUST be an authorization-designated flow (not authentication!)
-                # Using the same auth flow for both causes "exceeded stage recursion depth"
+                # authorization_flow needs authentication:none (default implicit-consent has require_authenticated)
                 authz_flows = _get('flows/instances/?designation=authorization').get('results', [])
-                authz_pk = next((f['pk'] for f in authz_flows if 'implicit' in f.get('slug', '')), authz_flows[0]['pk'] if authz_flows else None)
+                authz_pk = next((f['pk'] for f in authz_flows if f.get('slug') == 'ldap-authorization-flow'), None)
+                if not authz_pk:
+                    try:
+                        new_authz = _post('flows/instances/', {
+                            'name': 'ldap-authorization-flow', 'slug': 'ldap-authorization-flow',
+                            'title': 'ldap-authorization-flow', 'designation': 'authorization',
+                            'authentication': 'none', 'layout': 'stacked', 'denied_action': 'message_continue',
+                            'policy_engine_mode': 'any'})
+                        authz_pk = new_authz.get('pk')
+                    except urllib.error.HTTPError:
+                        authz_pk = next((f['pk'] for f in authz_flows if f.get('slug') == 'ldap-authorization-flow'), None)
+                        if not authz_pk:
+                            authz_pk = _get('flows/instances/ldap-authorization-flow/').get('pk')
                 patch_data = {'authentication_flow': ldap_flow_pk}
                 if authz_pk:
                     patch_data['authorization_flow'] = authz_pk
@@ -8077,7 +8112,17 @@ def _ensure_ldap_flow_authentication_none():
             ldap_provider = next((p for p in providers if p.get('name') == 'LDAP'), providers[0] if providers else None)
             if ldap_provider:
                 authz_flows = _get('flows/instances/?designation=authorization').get('results', [])
-                authz_pk = next((f['pk'] for f in authz_flows if 'implicit' in f.get('slug', '')), authz_flows[0]['pk'] if authz_flows else new_flow_pk)
+                authz_pk = next((f['pk'] for f in authz_flows if f.get('slug') == 'ldap-authorization-flow'), None)
+                if not authz_pk:
+                    try:
+                        new_authz = _post('flows/instances/', {
+                            'name': 'ldap-authorization-flow', 'slug': 'ldap-authorization-flow',
+                            'title': 'ldap-authorization-flow', 'designation': 'authorization',
+                            'authentication': 'none', 'layout': 'stacked', 'denied_action': 'message_continue',
+                            'policy_engine_mode': 'any'})
+                        authz_pk = new_authz.get('pk')
+                    except urllib.error.HTTPError:
+                        authz_pk = next((f['pk'] for f in authz_flows if 'implicit' in f.get('slug', '')), authz_flows[0]['pk'] if authz_flows else new_flow_pk)
                 _patch(f'providers/ldap/{ldap_provider["pk"]}/', {
                     'authentication_flow': new_flow_pk,
                     'authorization_flow': authz_pk})
